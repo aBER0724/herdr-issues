@@ -1,7 +1,8 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
-import { exec, theme, closeOverlay, setShared } from "herdr";
+import { exec, theme, openOverlay, closeOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
+import { blocks, picture, failed, loadPicture } from "./pictures.js";
 
 export const FIELDS = "number,title,body,author,state,stateReason,labels,assignees,createdAt,updatedAt,comments,url";
 const DETAIL = `${FIELDS},milestone,closedByPullRequestsReferences,reactionGroups`;
@@ -86,6 +87,12 @@ function timeline(raw) {
     }
   }
   return items;
+}
+
+// GitHub's Copy link, with the reference and number beside it: a popup of the panel's mod.
+export function copyMenu({ repo, number, title, url }, at) {
+  openOverlay({ mod: "issues", kind: "popup", width: 300, height: 222, ...(at ? { at } : {}),
+    props: { copyMenu: { url: url ?? `https://github.com/${repo}/issues/${number}`, ref: `${repo}#${number}`, number: `#${number}`, title: title ? `#${number} ${title}` : null } } });
 }
 
 // A label as GitHub tints it: its color faint behind, its color as text unless too dark to read.
@@ -251,11 +258,30 @@ export class Viewer {
         .when(!c.first && c.login === author, (e) => e.child(this.badge("Author", t)))
         .when(!c.first && Boolean(ROLES[c.role]), (e) => e.child(this.badge(ROLES[c.role], t))))
       .child(div().px(16).py(14).text_size(14).child(c.body?.trim()
-        ? TextView.markdown(key, linkify(c.body, this.repo)).selectable(true).on_link_click((url, cx) => this.link(url, cx))
+        ? this.markdown(key, c.body, t, cx)
         : div().text_color(t.muted).italic().child("No description provided.")))
       .when(c.reactions?.length > 0, (e) => e.child(h_flex().px(16).pb(14).gap(6).flex_wrap()
         .children(c.reactions.map((r) => h_flex().h(26).px(8).gap(5).items_center().rounded(13).border_1().border_color(t.border).bg(t.raised)
           .text_size(12).text_color(t.muted).child(div().text_size(14).child(r.emoji)).child(String(r.count))))));
+  }
+
+  // Markdown with its images drawn in between the text.
+  markdown(key, body, t, cx) {
+    const parts = blocks(body);
+    return v_flex().gap(12).children(parts.map((b, n) => b.image ? this.picture(`${key}-${n}`, b, t, cx)
+      : TextView.markdown(`${key}-${n}`, linkify(b.text, this.repo)).selectable(true).on_link_click((url, cx) => this.link(url, cx))));
+  }
+
+  // As GitHub sizes one: its width attribute, else its own, never wider than the column.
+  picture(key, b, t, cx) {
+    const loading = loadPicture(b.image);
+    if (loading) cx.spawn(async (cx) => { await loading; cx.notify(); });
+    const p = picture(b.image);
+    if (!p) return div().h(failed(b.image) ? 36 : 120).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.raised)
+      .flex().items_center().justify_center().px(12).text_size(12).text_color(t.muted).truncate()
+      .child(failed(b.image) ? `Image could not be loaded${b.alt ? `: ${b.alt}` : ""}` : "Loading image…");
+    const room = Math.max(240, (this.width ?? 1100) - 380), w = Math.min(b.width ?? p.width, room), h = Math.round(p.height * w / p.width);
+    return div().id(key).flex_none().cursor_pointer().on_click(() => openUrl(p.file)).child(image(p.path).w(w).h(h).rounded(6));
   }
 
   // An event on the timeline: a round icon on the line, then who did what, when.
@@ -400,6 +426,7 @@ export class Viewer {
       .when(this.loading || Boolean(this.busy), (e) => e.child(h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
         .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(this.busy ?? "Refreshing")))
       .when(Boolean(i) && !this.loading && !this.busy, (e) => e.child(this.button("issue-refresh", "Refresh", t, (_e, cx) => { this.load(cx); cx.notify(); }, { glyph: "refresh" })))
+      .when(Boolean(i), (e) => e.child(this.button("issue-copy", "Copy", t, () => copyMenu({ repo: this.repo, number: i.number, title: i.title, url: i.url }), { glyph: "copy" })))
       .when(Boolean(i), (e) => e.child(this.button("issue-github", "Open on GitHub", t, () => openUrl(i.url), { glyph: "external" })))
       .child(this.button("issue-close", "", t, () => closeOverlay(this.overlay), { glyph: "close" }));
     if (!i) return v_flex().id("issue").size_full().bg(t.background).text_color(t.foreground).text_size(14).px(32).pt(16).gap(20)
@@ -410,6 +437,7 @@ export class Viewer {
     const [state, color, glyph] = i.state === "OPEN" ? ["Open", GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", GITHUB.done, "pull"]
       : i.stateReason === "NOT_PLANNED" ? ["Closed", GITHUB.skipped, "skipped"] : ["Closed", GITHUB.done, "done"];
     return v_flex().id("issue").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(14)
+      .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
       .child(v_flex().flex_none().px(32).pt(14).pb(18).gap(14).border_b(1).border_color(t.border)
         .child(bar)
         // Word by word, so the title wraps like text with the number after its last word.

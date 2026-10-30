@@ -7,8 +7,9 @@ A GitHub issues panel for the [Herdr](https://herdr.dev) desktop app. It sits ne
 - **Follows your focus.** The panel shows the issues of the GitHub repository of the focused terminal. Each space remembers its own repository, so a terminal outside any repository keeps showing that one.
 - **In this terminal.** Issue numbers (`#123`) and issue or pull request links on the focused terminal's screen are listed at the top, newest first, so an agent's "fixed #55" is one click away.
 - **Open and closed, sorted your way.** Filter on open or closed, all or assigned to you, or by text, and sort the way GitHub does: newest, oldest, recently updated, least recently updated, most commented.
+- **Copy it.** Copy an issue's link, `owner/repo#123` or `#123` from the issue view, or by right-clicking it in the list.
 - **Fast.** Issues are cached per repository. After the first fetch, only what changed since the last sync is fetched, every 30 seconds while the panel is open.
-- **A GitHub-style issue view.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables and code, `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants.
+- **A GitHub-style issue view.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants.
 
 ![Issue view](issue.png)
 
@@ -50,4 +51,4 @@ The mod also works as a pane of its own: `herdr-app do pane.split --direction ri
 
 ## What it runs and stores
 
-The mod runs `gh` (on the machine of the space, for remote spaces) and `hc read` on the focused terminal to find issue numbers. It changes issues only when you press a button in the issue view. Its cache lives in `~/.config/herdr-app/data/issues/`, next to the icons and GitHub avatars it saves there (Herdr doesn't load images from a symlinked mod folder).
+The mod runs `gh` (on the machine of the space, for remote spaces) and `hc read` on the focused terminal to find issue numbers. It changes issues only when you press a button in the issue view. Its cache lives in `~/.config/herdr-app/data/issues/`, next to the icons, GitHub avatars and issue images it saves there (Herdr doesn't load images from a symlinked mod folder). Images on github.com are fetched with your `gh` token, which only goes to github.com.

@@ -1,8 +1,8 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, props, appHome, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, notify, props, appHome, shared, setShared } from "herdr";
 import * as fs from "fs/promises";
-import { Viewer, FIELDS } from "./viewer.js";
+import { Viewer, FIELDS, copyMenu } from "./viewer.js";
 import { icons, icon } from "./icons.js";
 
 // Where the focused pane is, as the Changes panel finds it. A focused mod pane
@@ -79,12 +79,13 @@ async function save(repo, store) {
 }
 
 // The panel; its Issues button beside the tab bar's Files and Changes (props
-// { button: true }); or one issue, or the sort menu, as an overlay of the panel.
+// { button: true }); or one issue, the sort menu or the copy menu, as an overlay of the panel.
 export default class Issues extends View {
   init(_props, cx) {
-    const { issue, overlay, sortMenu, button } = props() ?? {};
+    const { issue, overlay, sortMenu, copyMenu: copying, button } = props() ?? {};
     if (issue) { this.viewer = new Viewer(issue, overlay, cx); return; }
     if (sortMenu) { this.menu = overlay; return; }
+    if (copying) { this.copying = { ...copying, overlay }; return; }
     if (button) {
       // The tab bar restores each space's panel only if it's one of these.
       const panels = shared("workspace.panels") ?? ["files", "changes"];
@@ -278,6 +279,7 @@ export default class Issues extends View {
     const closed = i.state && i.state !== "OPEN";
     return h_flex().id(`${where}-${i.number}`).flex_none().px(10).py(6).gap(8).items_start().rounded(7).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click(() => this.open(i.number))
+      .on_mouse_down("right", () => copyMenu({ repo: this.repo, number: i.number, title: i.title, url: i.url }, "pointer"))
       .child(div().flex_none().w(40).text_color(closed ? t.ansi5 : t.dim).child(`#${i.number}`))
       .child(div().flex_1().min_w(0).text_color(closed && where !== "issue" ? t.muted : t.foreground).child(i.title));
   }
@@ -301,10 +303,21 @@ export default class Issues extends View {
         .child(div().w(14).text_color(t.accent).child(key === current ? "✓" : "")).child(s.label)));
   }
 
+  copyMenu(t) {
+    const { url, ref, number, title, overlay } = this.copying;
+    const items = [["Copy link", url], ["Copy reference", ref], ["Copy number", number], ["Copy number and title", title]].filter(([, text]) => text);
+    return v_flex().id("issues-copy").size_full().p(6).gap(1).bg(t.popover).text_color(t.foreground).text_size(12)
+      .children(items.map(([label, text], n) => v_flex().id(`copy-${n}`).px(8).py(6).rounded(6).cursor_pointer().hover((e) => e.bg(t.hover))
+        .on_click((_e, cx) => { cx.write_to_clipboard(text); notify({ title: "Copied", body: text, level: "success", timeout: 2500 }); closeOverlay(overlay); })
+        .child(div().font_semibold().child(label))
+        .child(div().text_size(11).text_color(t.muted).truncate().child(text))));
+  }
+
   render(cx) {
     if (this.viewer) return this.viewer.render(cx);
     const t = theme();
     if (this.menu) return this.sortMenu(t);
+    if (this.copying) return this.copyMenu(t);
     if (this.button) return this.toolbar(t);
     const away = hidden();
     if (this.away && !away) { this.refresh(cx); this.scan(cx); }
