@@ -1,5 +1,7 @@
 # Herdr Issues
 
+![Herdr Issues: GitHub issues right next to your terminals and coding agents](social.png)
+
 A GitHub issues panel for the [Herdr](https://herdr.dev) desktop app. It sits next to Files and Changes in the tab bar, follows the repository of the terminal you're in, and opens issues in a GitHub-style view where you can comment, edit labels, assign yourself, close and reopen.
 
 ![Issues panel](preview.png)
