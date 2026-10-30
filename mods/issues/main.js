@@ -95,7 +95,7 @@ export default class Issues extends View {
     }
     // Per repo: its open and recently closed issues in full, what other numbers are, and when they were synced.
     this.stores = {}; this.repos = remembered("repos"); this.logins = remembered("logins");
-    ({ repo: this.repo = null, on: this.repoOn = null } = remembered("shown"));
+    this.spaceRepos = remembered("spaces"); this.repo = null;
     this.query = ""; this.state = "OPEN"; this.mine = false; this.mentioned = []; this.changedAt = shared("issues.changed")?.at;
     this.input = InputState.new({ placeholder: "Filter issues" });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
@@ -122,7 +122,7 @@ export default class Issues extends View {
 
   where() { return (this.last = location(this.last)); }
 
-  context() { return JSON.stringify(this.where()); }
+  context() { return JSON.stringify([this.where(), focused()?.space]); }
 
   // gh resolves the repo from the folder's remotes; a hit is kept per folder.
   async repoFor(cwd, on) {
@@ -174,14 +174,31 @@ export default class Issues extends View {
     return full || got.length > 0;
   }
 
-  // A folder outside any GitHub repo (home, say) keeps the last repo on screen.
+  // Each space shows the repo its own terminals were last in: a folder outside
+  // any GitHub repo (home, say) keeps it, and a space never in one shows none.
+  pick(found, space, on) {
+    if (found) { this.spaceRepos[space] = { repo: found, on }; localStorage.setItem("spaces", JSON.stringify(this.spaceRepos)); }
+    const choice = this.spaceRepos[space] ?? this.guess(space);
+    if ((choice?.repo ?? null) !== this.repo) { this.repo = choice?.repo ?? null; this.mentioned = []; }
+    this.repoOn = choice?.on ?? null;
+  }
+
+  // A space not seen yet: any of its terminals in a folder whose repo is known.
+  guess(space) {
+    const s = spaces().find((x) => x.id === space), tabs = new Set(s?.tabs.map((tab) => tab.id) ?? []), on = s?.machine ?? null;
+    for (const p of panes()) {
+      const repo = tabs.has(p.tab) && p.cwd ? this.repos[JSON.stringify([p.cwd, on])] : null;
+      if (repo) return { repo, on };
+    }
+    return null;
+  }
+
   refresh(cx) {
-    const { cwd, on } = this.where(), context = this.context();
+    const { cwd, on } = this.where(), context = this.context(), space = focused()?.space;
     if (context !== this.ctx) {
       // A folder seen before shows its repo's cached issues at once.
       this.ctx = context; this.error = null;
-      const repo = cwd ? this.repos[JSON.stringify([cwd, on])] : null;
-      if (repo && repo !== this.repo) { this.repo = repo; this.repoOn = on; this.mentioned = []; }
+      this.pick(cwd ? this.repos[JSON.stringify([cwd, on])] : null, space, on);
     }
     if (this.syncing) { this.again = true; return; }
     this.syncing = true;
@@ -189,8 +206,7 @@ export default class Issues extends View {
       try {
         const found = cwd ? await this.repoFor(cwd, on) : null;
         if (this.context() !== context) return;
-        if (found && found !== this.repo) { this.repo = found; this.mentioned = []; }
-        if (found) { this.repoOn = on; localStorage.setItem("shown", JSON.stringify({ repo: found, on })); }
+        this.pick(found, space, on);
         const repo = this.repo;
         if (!repo) return;
         const store = await this.store(repo);
@@ -248,7 +264,7 @@ export default class Issues extends View {
   // The dialog gets the issue in full when the list has it, so it shows at once.
   open(number) {
     const data = this.issues().find((i) => i.number === number) ?? null;
-    openOverlay({ mod: "issues", kind: "dialog", width: 0.74, height: 0.88, props: { issue: { repo: this.repo, number, on: this.repoOn ?? null, data, me: this.me } } });
+    openOverlay({ mod: "issues", kind: "dialog", width: 0.86, height: 0.9, props: { issue: { repo: this.repo, number, on: this.repoOn ?? null, data, me: this.me } } });
   }
 
   shown() {
