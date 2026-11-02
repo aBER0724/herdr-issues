@@ -11,17 +11,17 @@ const tokenPath = () => `${appHome()}/data/issues/gitee-token`;
 const token = async () => (await fs.readFile(tokenPath(), "utf8").catch(() => "")).trim();
 
 const form = (params) => Object.entries(params)
-  .filter(([, v]) => v !== undefined && v !== null && v !== "")
+  .filter(([, v]) => v !== undefined && v !== null)
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join("&");
 
 // A token goes in the query for reads and in the body for writes, as Gitee asks.
 async function request(path, { method = "GET", params = {}, body = null } = {}) {
-  const t = await token();
-  const fields = { ...params, ...(t ? { access_token: t } : {}) };
-  const r = await fetch(body ? `${API}${path}` : `${API}${path}?${form(fields)}`, body ? {
+  const t = await token(), auth = t ? { access_token: t } : {}, query = form({ ...params, ...auth });
+  const write = Boolean(body);
+  const r = await fetch(`${API}${path}${write || !query ? "" : `?${query}`}`, write ? {
     method,
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form({ ...body, ...(t ? { access_token: t } : {}) }),
+    body: form({ ...body, ...auth }),
   } : { method });
   const text = await r.text();
   let data = null;
@@ -53,6 +53,14 @@ const STATE = {
 };
 
 const person = (u) => (u ? { login: u.login, avatarUrl: u.avatar_url, url: u.html_url } : null);
+
+// Gitee updates an issue through its owner, not the repo: the path carries the
+// owner and the body names the repo. `state` takes open, progressing or closed;
+// rejected exists on issues but the API refuses to set it.
+const update = (repo, number, fields) => request(`/repos/${repo.split("/")[0]}/issues/${number}`, {
+  method: "PATCH",
+  body: { repo: repo.split("/")[1], ...fields },
+});
 
 // Gitee writes the state's color with a # and a label's without; both go out as
 // the #rrggbb the dialog draws with.
@@ -119,16 +127,16 @@ export const gitee = {
     await request(`/repos/${repo}/issues/${number}/comments`, { method: "POST", body: { body } });
   },
 
-  async setState({ repo, number, close, reason, body }) {
+  async setState({ repo, number, close, body }) {
     if (body) await gitee.comment({ repo, number, body });
-    await request(`/repos/${repo}/issues/${number}`, { method: "PATCH", body: { repo, state: close ? (reason === "not planned" ? "rejected" : "closed") : "open" } });
+    await update(repo, number, { state: close ? "closed" : "open" });
   },
 
   // Gitee has one assignee, and "" clears it.
   async assign({ repo, number, assign }) {
     const login = await gitee.me();
     if (!login) throw new Error(`Assigning needs a Gitee token in ${tokenPath()}`);
-    await request(`/repos/${repo}/issues/${number}`, { method: "PATCH", body: { repo, assignee: assign ? login : "" } });
+    await update(repo, number, { assignee: assign ? login : "" });
   },
 
   async labels({ repo }) {
@@ -140,6 +148,6 @@ export const gitee = {
 
   // The whole list, as Gitee takes labels as one comma-separated field.
   async toggleLabel({ repo, number, labels }) {
-    await request(`/repos/${repo}/issues/${number}`, { method: "PATCH", body: { repo, labels: labels.join(",") } });
+    await update(repo, number, { labels: labels.join(",") });
   },
 };

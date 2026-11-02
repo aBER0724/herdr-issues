@@ -133,14 +133,19 @@ export default class Issues extends View {
   context() { return JSON.stringify([this.where(), focused()?.space]); }
 
   // The folder's remotes decide the platform: a GitHub one wins over a Gitee one.
+  // The answer is kept per folder, and read once more each time the mod starts,
+  // so a remote added or removed since doesn't leave the panel on the old one.
   async repoFor(cwd, on) {
     const id = JSON.stringify([cwd, on]);
-    if (!this.repos[id]) {
-      const r = await exec("git", ["remote", "-v"], { cwd, on });
-      const remotes = r.code === 0 ? r.stdout.split("\n").map((line) => remoteRepo(line.split(/\s+/)[1] ?? "")).filter(Boolean) : [];
-      const found = ORDER.map((provider) => remotes.find((m) => m.provider === provider)).find(Boolean);
-      if (found) { this.repos[id] = found; localStorage.setItem("repos", JSON.stringify(this.repos)); }
-    }
+    this.checked ??= {};
+    if (this.checked[id]) return this.repos[id] ?? null;
+    this.checked[id] = true;
+    const r = await exec("git", ["remote", "-v"], { cwd, on });
+    const remotes = r.code === 0 ? r.stdout.split("\n").map((line) => remoteRepo(line.split(/\s+/)[1] ?? "")).filter(Boolean) : [];
+    const found = ORDER.map((provider) => remotes.find((m) => m.provider === provider)).find(Boolean);
+    if (found) this.repos[id] = found;
+    else if (r.code === 0) delete this.repos[id];
+    if (found || r.code === 0) localStorage.setItem("repos", JSON.stringify(this.repos));
     return this.repos[id] ?? null;
   }
 

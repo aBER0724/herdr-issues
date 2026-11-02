@@ -355,10 +355,11 @@ export class Viewer {
           .child(open
             ? h_flex().gap(0)
               .child(this.button("issue-close-done", text ? "Close with comment" : "Close issue", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
-              .child(this.button("issue-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy }))
+              .when(this.api.name !== "gitee", (e) => e.child(this.button("issue-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
             : this.button("issue-reopen", text ? "Reopen with comment" : "Reopen issue", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
           .child(this.button("issue-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
-        .when(open && Boolean(this.closeMenu), (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
+        // Gitee's API won't set its rejected state, so "not planned" isn't offered there.
+        .when(open && Boolean(this.closeMenu) && this.api.name !== "gitee", (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
           .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
             .map(([glyph, title, note, reason, tint]) => h_flex().id(`issue-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
               .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setState(true, reason, cx))

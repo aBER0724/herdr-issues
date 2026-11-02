@@ -69,6 +69,7 @@ How Gitee differs, and what that means here:
 - Issues are identified by a string (`IKS135`), not a number, so lists show `#IKS135` and the panel sorts newest by Gitee's internal id.
 - Gitee has four states (open, progressing, closed, rejected); the panel's Open covers the first two and Closed the last two, and the issue view shows Gitee's own state name and color.
 - One assignee, not a list: "Assign yourself" replaces whoever had it.
+- Closing as not planned isn't offered: Gitee's API refuses to set its rejected state (it can only close as completed), though issues already rejected read as not planned.
 - No reactions, no timeline endpoint and no linked pull requests, so the issue view shows comments only and says so under Development.
 - The incremental sync asks Gitee for issues updated since the last one (`since`), in either state.
 
