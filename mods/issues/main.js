@@ -283,7 +283,7 @@ export default class Issues extends View {
     if (!i) return;
     this.detailView = new Viewer({
       repo: this.repo, provider: this.provider, kind: this.kind, number: i.number,
-      on: this.repoOn ?? null, data: i, me: this.me,
+      on: this.repoOn ?? null, data: i, me: this.me, folder: this.where().cwd,
     }, cx, { onBack: (cx) => { this.showList(); cx.notify(); } });
     cx.notify();
   }
