@@ -3,11 +3,10 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { exec, theme, openOverlay, closeOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
 import { blocks, picture, failed, loadPicture } from "./pictures.js";
+import { providerOf, providerAt } from "./api.js";
 
-export const FIELDS = "number,title,body,author,state,stateReason,labels,assignees,createdAt,updatedAt,comments,url";
-const DETAIL = `${FIELDS},milestone,closedByPullRequestsReferences,reactionGroups`;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const ISSUE_URL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)(?:[/?#].*)?$/;
+const ISSUE_URL = /^https:\/\/(github\.com|gitee\.com)\/([\w.-]+\/[\w.-]+?)\/(?:issues|pull|pulls)\/([\w-]+)(?:[/?#].*)?$/;
 // GitHub's own state colors, the same in every theme so they read as GitHub's.
 const GITHUB = { open: "#238636", done: "#8957e5", skipped: "#6e7681", link: "#4493f8" };
 const EMOJI = {
@@ -31,11 +30,11 @@ export function openUrl(url) {
   exec("sh", ["-c", 'xdg-open "$1" >/dev/null 2>&1 &', "sh", url]).catch(() => exec("open", [url]).catch(() => null));
 }
 
-// #123 and owner/repo#123 outside code become links, as on GitHub.
-function linkify(markdown, repo) {
+// #123 (GitHub) or #IKS135 (Gitee), and owner/repo#123, outside code become links.
+function linkify(markdown, repo, api) {
+  const ref = api.name === "gitee" ? /(^|[\s(])(?:([\w.-]+\/[\w.-]+))?#([A-Za-z][A-Za-z0-9]{3,9})\b/g : /(^|[\s(])(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/g;
   return markdown.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, n) => n % 2 ? part
-    : part.replace(/(^|[\s(])(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/g, (_m, pre, other, number) =>
-      `${pre}[${other ?? ""}#${number}](https://github.com/${other ?? repo}/issues/${number})`)).join("");
+    : part.replace(ref, (_m, pre, other, number) => `${pre}[${other ?? ""}#${number}](${api.web}/${other ?? repo}/issues/${number})`)).join("");
 }
 
 // gh says app/name for apps, the REST API name[bot]; GitHub shows the name with a bot badge.
@@ -89,10 +88,10 @@ function timeline(raw) {
   return items;
 }
 
-// GitHub's Copy link, with the reference and number beside it: a popup of the panel's mod.
-export function copyMenu({ repo, number, title, url }, at) {
+// Copy link, with the reference and number beside it: a popup of the panel's mod.
+export function copyMenu({ repo, provider, number, title, url }, at) {
   openOverlay({ mod: "issues", kind: "popup", width: 300, height: 222, ...(at ? { at } : {}),
-    props: { copyMenu: { url: url ?? `https://github.com/${repo}/issues/${number}`, ref: `${repo}#${number}`, number: `#${number}`, title: title ? `#${number} ${title}` : null } } });
+    props: { copyMenu: { url: url ?? `${providerOf(provider).web}/${repo}/issues/${number}`, ref: `${repo}#${number}`, number: `#${number}`, title: title ? `#${number} ${title}` : null } } });
 }
 
 // A label as GitHub tints it: its color faint behind, its color as text unless too dark to read.
@@ -103,13 +102,14 @@ export function labelChip(l, t) {
     .text_size(12).font_semibold().text_color(light ? `#${l.color}` : t.foreground).child(l.name);
 }
 
-// One issue in a dialog: { repo, number, on, data?, me? } from the panel. With
+// One issue in a dialog: { repo, provider, number, on, data?, me? } from the panel. With
 // data (the panel's cached copy) it shows at once; the full issue and its
 // timeline load behind it. Links to other issues and pull requests open here
 // too, with Back to return.
 export class Viewer {
-  constructor({ repo, number, on, data, me }, overlay, cx) {
+  constructor({ repo, number, provider, on, data, me }, overlay, cx) {
     this.repo = repo; this.number = number; this.on = on; this.me = me; this.overlay = overlay;
+    this.api = providerOf(provider);
     this.history = []; this.cache = {}; this.timelines = {}; this.labels = {}; this.tab = "write";
     if (data) this.cache[`${repo}#${number}`] = data;
     this.reply = TextareaState.new({ placeholder: "Use Markdown to format your comment" });
@@ -123,21 +123,16 @@ export class Viewer {
   id() { return `${this.repo}#${this.number}`; }
 
   load(cx) {
-    const repo = this.repo, number = this.number, id = this.id(), current = () => this.id() === id;
+    const repo = this.repo, number = this.number, id = this.id(), on = this.on, api = this.api, current = () => this.id() === id;
     this.issue = this.cache[id] ?? null; this.error = null; this.loading = true;
-    const gh = async (args) => {
-      const r = await exec("gh", args, { on: this.on });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-      return JSON.parse(r.stdout);
-    };
     cx.spawn(async (cx) => {
       try {
-        const [issue, pages] = await Promise.all([
-          gh(["issue", "view", String(number), "-R", repo, "--json", DETAIL]),
-          gh(["api", "--paginate", "--slurp", `repos/${repo}/issues/${number}/timeline?per_page=100`]).catch(() => null),
+        const [issue, raw] = await Promise.all([
+          api.view({ repo, number, on }),
+          api.timeline({ repo, number, on }).catch(() => null),
         ]);
         this.cache[id] = issue;
-        if (pages) this.timelines[id] = timeline(pages.flat());
+        if (raw) this.timelines[id] = timeline(raw);
         if (current()) this.issue = issue;
       } catch (e) { if (current()) this.error = String(e?.message ?? e); }
       finally { if (current()) { this.loading = false; cx.notify(); } }
@@ -160,23 +155,24 @@ export class Viewer {
 
   link(url, cx) {
     const m = ISSUE_URL.exec(url);
-    if (m) this.go(m[1], Number(m[2]), cx); else openUrl(url);
+    if (m && providerAt(m[1]) === this.api.name) this.go(m[2], m[3], cx);
+    else openUrl(url);
   }
 
-  // Runs `gh issue <args>` on this issue, then reloads it and tells the panel.
-  change(label, args, cx, after) {
+  // Runs the change on this issue through its platform, then reloads it and
+  // tells the panel.
+  change(label, work, cx, after) {
     if (this.busy) return;
-    const repo = this.repo, number = this.number, id = this.id();
+    const repo = this.repo, provider = this.api.name, number = this.number, id = this.id();
     this.busy = label; this.error = null; this.closeMenu = false;
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("gh", ["issue", args[0], String(number), "-R", repo, ...args.slice(1)], { on: this.on });
-        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        await work();
         after?.();
       } catch (e) { this.error = String(e?.message ?? e); }
       finally {
         this.busy = null;
-        setShared("issues.changed", { repo, number, on: this.on, at: Date.now() });
+        setShared("issues.changed", { repo, provider, number, on: this.on, at: Date.now() });
         if (this.id() === id) this.load(cx);
         cx.notify();
       }
@@ -188,29 +184,28 @@ export class Viewer {
 
   comment(cx) {
     const body = this.reply.value().trim();
-    if (body) this.change("Commenting", ["comment", "--body", body], cx, () => this.cleared());
+    if (body) this.change("Commenting", () => this.api.comment({ repo: this.repo, number: this.number, body, on: this.on }), cx, () => this.cleared());
   }
 
   // Closing or reopening takes what's in the comment box along, as on GitHub.
   setState(close, reason, cx) {
-    const body = this.reply.value().trim(), args = close ? ["close", "--reason", reason] : ["reopen"];
-    if (body) args.push("--comment", body);
-    this.change(close ? "Closing" : "Reopening", args, cx, () => this.cleared());
+    const body = this.reply.value().trim();
+    this.change(close ? "Closing" : "Reopening", () => this.api.setState({ repo: this.repo, number: this.number, close, reason, body, on: this.on }), cx, () => this.cleared());
   }
 
-  // Shows the change at once; the reload after gh confirms it.
+  // Shows the change at once; the reload after the platform confirms it.
   toggleLabel(l, cx) {
     const has = this.issue.labels.some((x) => x.name === l.name);
     this.issue.labels = has ? this.issue.labels.filter((x) => x.name !== l.name) : [...this.issue.labels, l];
-    this.change("Saving labels", ["edit", has ? "--remove-label" : "--add-label", l.name], cx);
+    const labels = this.issue.labels.map((x) => x.name);
+    this.change("Saving labels", () => this.api.toggleLabel({ repo: this.repo, number: this.number, name: l.name, add: !has, labels, on: this.on }), cx);
   }
 
   editLabels(cx) {
     this.editing = !this.editing;
     const repo = this.repo;
     if (this.editing && !this.labels[repo]) cx.spawn(async (cx) => {
-      const r = await exec("gh", ["label", "list", "-R", repo, "--limit", "200", "--json", "name,color,description"], { on: this.on }).catch(() => null);
-      this.labels[repo] = r?.code === 0 ? JSON.parse(r.stdout).sort((a, b) => a.name.localeCompare(b.name)) : [];
+      this.labels[repo] = await this.api.labels({ repo, on: this.on }).catch(() => []);
       cx.notify();
     });
     cx.notify();
@@ -269,7 +264,7 @@ export class Viewer {
   markdown(key, body, t, cx) {
     const parts = blocks(body);
     return v_flex().gap(12).children(parts.map((b, n) => b.image ? this.picture(`${key}-${n}`, b, t, cx)
-      : TextView.markdown(`${key}-${n}`, linkify(b.text, this.repo)).selectable(true).on_link_click((url, cx) => this.link(url, cx))));
+      : TextView.markdown(`${key}-${n}`, linkify(b.text, this.repo, this.api)).selectable(true).on_link_click((url, cx) => this.link(url, cx))));
   }
 
   // As GitHub sizes one: its width attribute, else its own, never wider than the column.
@@ -334,7 +329,7 @@ export class Viewer {
   thread(i, t, cx) {
     const items = this.timelines[this.id()]
       ?? i.comments.map((c) => ({ kind: "comment", login: login(c.author), at: c.createdAt, body: c.body, role: c.authorAssociation, reactions: reactions(c.reactionGroups) }));
-    const first = { kind: "comment", first: true, login: login(i.author), at: i.createdAt, body: i.body, reactions: reactions(i.reactionGroups) };
+    const first = { kind: "comment", first: true, login: login(i.author), avatar: i.author?.avatarUrl, at: i.createdAt, body: i.body, reactions: reactions(i.reactionGroups) };
     return [this.card("issue-body", first, t, cx), ...items.flatMap((e, n) => [this.joint(t),
       e.kind === "comment" ? this.card(`issue-comment-${n}`, e, t, cx) : this.event(`issue-event-${n}`, e, t, cx)])];
   }
@@ -353,7 +348,7 @@ export class Viewer {
         .child(this.tab === "write"
           ? div().id("issue-reply").px(12).py(10).bg(t.background).cursor_text().child(Textarea.new(this.reply).w_full().text_size(14).text_color(t.foreground))
           : div().px(16).py(14).min_h(110).bg(t.background).text_size(14).child(text
-            ? TextView.markdown("issue-preview", linkify(this.reply.value(), this.repo)).on_link_click((url, cx) => this.link(url, cx))
+            ? TextView.markdown("issue-preview", linkify(this.reply.value(), this.repo, this.api)).on_link_click((url, cx) => this.link(url, cx))
             : div().text_color(t.muted).child("Nothing to preview")))
         .child(h_flex().px(12).py(10).gap(8).items_center().bg(t.background).border_t(1).border_color(t.border)
           .child(div().flex_1().text_size(12).text_color(t.muted).child("Markdown is supported · Ctrl+Enter comments"))
@@ -384,14 +379,14 @@ export class Viewer {
     const action = (id, label, onClick) => div().id(id).text_size(12).font_normal().text_color(GITHUB.link).cursor_pointer().hover((s) => s.underline()).on_click(onClick).child(label);
     // Everyone who wrote or did something here, in order of appearance, people only.
     const people = new Map();
-    for (const [name, url] of [[login(i.author)], ...i.comments.map((c) => [login(c.author)]), ...(this.timelines[this.id()] ?? []).map((e) => [e.login, e.avatar])])
+    for (const [name, url] of [[login(i.author), i.author?.avatarUrl], ...i.comments.map((c) => [login(c.author)]), ...(this.timelines[this.id()] ?? []).map((e) => [e.login, e.avatar])])
       if (!bot(name)) people.set(name, people.get(name) ?? url ?? null);
     const prs = i.closedByPullRequestsReferences ?? [];
     return v_flex().id("issue-sidebar").w(264).flex_none().min_h(0).overflow_y_scrollbar().pl(8).pr(24).pt(6)
       .child(this.section("Assignees", t, i.assignees.length
         ? v_flex().gap(8).children(i.assignees.map((a) => h_flex().gap(8).items_center().text_size(13).font_semibold().child(this.pic(a.login, null, 20, t, cx)).child(a.login)))
-        : h_flex().gap(4).child(none("No one ·")).when(!pr && Boolean(this.me), (e) => e.child(action("issue-assign", "Assign yourself", (_e, cx) => this.change("Assigning", ["edit", "--add-assignee", "@me"], cx)))),
-        !pr && mine ? action("issue-unassign", "Unassign me", (_e, cx) => this.change("Unassigning", ["edit", "--remove-assignee", "@me"], cx)) : null))
+        : h_flex().gap(4).child(none("No one ·")).when(!pr && Boolean(this.me), (e) => e.child(action("issue-assign", "Assign yourself", (_e, cx) => this.change("Assigning", () => this.api.assign({ repo: this.repo, number: this.number, assign: true, on: this.on }), cx)))),
+        !pr && mine ? action("issue-unassign", "Unassign me", (_e, cx) => this.change("Unassigning", () => this.api.assign({ repo: this.repo, number: this.number, assign: false, on: this.on }), cx)) : null))
       .child(this.section("Labels", t, this.editing
         ? (!all ? none("Loading labels…") : v_flex().gap(1).children(all.map((l) => {
           const on = i.labels.some((x) => x.name === l.name);
@@ -413,7 +408,7 @@ export class Viewer {
           .child(div().pt(1).child(this.glyph("pull", 14, GITHUB.done)))
           .child(v_flex().child(div().font_semibold().hover((s) => s.text_color(GITHUB.link)).child(`#${p.number}`))
             .child(div().text_size(12).text_color(t.muted).child(`${p.repository?.owner?.login}/${p.repository?.name}`)))))
-        : none("No branches or pull requests")))
+        : none(this.api.name === "gitee" ? "Gitee doesn't list these" : "No branches or pull requests")))
       .child(this.section("Participants", t, h_flex().gap(4).flex_wrap().children([...people].slice(0, 18).map(([name, url]) => this.pic(name, url, 24, t, cx)))));
   }
 
@@ -426,16 +421,16 @@ export class Viewer {
       .when(this.loading || Boolean(this.busy), (e) => e.child(h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
         .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(this.busy ?? "Refreshing")))
       .when(Boolean(i) && !this.loading && !this.busy, (e) => e.child(this.button("issue-refresh", "Refresh", t, (_e, cx) => { this.load(cx); cx.notify(); }, { glyph: "refresh" })))
-      .when(Boolean(i), (e) => e.child(this.button("issue-copy", "Copy", t, () => copyMenu({ repo: this.repo, number: i.number, title: i.title, url: i.url }), { glyph: "copy" })))
-      .when(Boolean(i), (e) => e.child(this.button("issue-github", "Open on GitHub", t, () => openUrl(i.url), { glyph: "external" })))
+      .when(Boolean(i), (e) => e.child(this.button("issue-copy", "Copy", t, () => copyMenu({ repo: this.repo, provider: this.api.name, number: i.number, title: i.title, url: i.url }), { glyph: "copy" })))
+      .when(Boolean(i), (e) => e.child(this.button("issue-github", `Open on ${this.api.label}`, t, () => openUrl(i.url), { glyph: "external" })))
       .child(this.button("issue-close", "", t, () => closeOverlay(this.overlay), { glyph: "close" }));
     if (!i) return v_flex().id("issue").size_full().bg(t.background).text_color(t.foreground).text_size(14).px(32).pt(16).gap(20)
       .child(bar)
       .child(this.loading ? div().text_color(t.muted).child(`Loading #${this.number}…`) : div().text_color(t.ansi1).child(this.error ?? ""));
 
     const pr = i.url.includes("/pull/");
-    const [state, color, glyph] = i.state === "OPEN" ? ["Open", GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", GITHUB.done, "pull"]
-      : i.stateReason === "NOT_PLANNED" ? ["Closed", GITHUB.skipped, "skipped"] : ["Closed", GITHUB.done, "done"];
+    const [state, color, glyph] = i.state === "OPEN" ? [i.stateText ?? "Open", i.stateColor ?? GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", GITHUB.done, "pull"]
+      : i.stateReason === "NOT_PLANNED" ? [i.stateText ?? "Closed", i.stateColor ?? GITHUB.skipped, "skipped"] : [i.stateText ?? "Closed", i.stateColor ?? GITHUB.done, "done"];
     return v_flex().id("issue").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(14)
       .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
       .child(v_flex().flex_none().px(32).pt(14).pb(18).gap(14).border_b(1).border_color(t.border)

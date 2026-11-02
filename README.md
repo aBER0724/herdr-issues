@@ -1,23 +1,23 @@
 # Herdr Issues
 
-![Herdr Issues: GitHub issues right next to your terminals and coding agents](social.png)
+![Herdr Issues: GitHub and Gitee issues right next to your terminals and coding agents](social.png)
 
-A GitHub issues panel for the [Herdr](https://herdr.dev) desktop app. It sits next to Files and Changes in the tab bar, follows the repository of the terminal you're in, and opens issues in a GitHub-style view where you can comment, edit labels, assign yourself, close and reopen.
+A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. It sits next to Files and Changes in the tab bar, follows the repository of the terminal you're in (github.com or gitee.com), and opens issues in a GitHub-style view where you can comment, edit labels, assign yourself, close and reopen.
 
 ![Issues panel](preview.png)
 
-- **Follows your focus.** The panel shows the issues of the GitHub repository of the focused terminal. Each space remembers its own repository, so a terminal outside any repository keeps showing that one.
-- **In this terminal.** Issue numbers (`#123`) and issue or pull request links on the focused terminal's screen are listed at the top, newest first, so an agent's "fixed #55" is one click away.
+- **Follows your focus.** The panel shows the issues of the repository the focused terminal is in, GitHub's or Gitee's; a folder with both remotes shows GitHub's. Each space remembers its own repository, so a terminal outside any repository keeps showing that one.
+- **In this terminal.** Issue numbers (`#123`, or `#IKS135` on Gitee) and issue or pull request links on the focused terminal's screen are listed at the top, newest first, so an agent's "fixed #55" is one click away.
 - **Open and closed, sorted your way.** Filter on open or closed, all or assigned to you, or by text, and sort the way GitHub does: newest, oldest, recently updated, least recently updated, most commented.
-- **Copy it.** Copy an issue's link, `owner/repo#123` or `#123` from the issue view, or by right-clicking it in the list.
+- **Copy it.** Copy an issue's link, `owner/repo#123` or `#123` from the issue view, or by right-clicking it in the list (`#IKS135` on Gitee).
 - **Fast.** Issues are cached per repository. After the first fetch, only what changed since the last sync is fetched, every 30 seconds while the panel is open.
-- **A GitHub-style issue view.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants.
+- **A GitHub-style issue view.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants. On Gitee the timeline is its comments, the state pill shows Gitee's own state (意向, 进行中, 已完成, 已拒绝), and linked pull requests aren't listed.
 
 ![Issue view](issue.png)
 
 ## Install
 
-You need the [GitHub CLI](https://cli.github.com) (`gh`), logged in with `gh auth login`.
+For GitHub repositories you need the [GitHub CLI](https://cli.github.com) (`gh`), logged in with `gh auth login`. Gitee needs a personal access token instead, see [Gitee](#gitee).
 
 Clone this repository and link the mod into Herdr's home, so a `git pull` updates it:
 
@@ -51,6 +51,27 @@ And the Issues button next to the tab bar, which opens and closes that panel:
 
 The mod also works as a pane of its own: `herdr-app do pane.split --direction right --mod issues`.
 
+## Gitee
+
+A folder whose remotes are on gitee.com shows its Gitee issues in the same panel; the header says Gitee next to the repository. A folder with a remote on both platforms shows GitHub's, as it always has.
+
+Gitee reads work without credentials at 60 requests an hour, which runs out quickly, and private repositories need a token. Create one at [gitee.com/profile/personal_access_tokens](https://gitee.com/profile/personal_access_tokens) with the **issues** and **notes** scopes, and write it into this file:
+
+```sh
+mkdir -p ~/.config/herdr-app/data/issues
+pbpaste > ~/.config/herdr-app/data/issues/gitee-token
+```
+
+The mod reads the token per request. It goes in the query string of a read and in the body of a write, only ever to gitee.com, and never into a program's arguments where `ps` would show it.
+
+How Gitee differs, and what that means here:
+
+- Issues are identified by a string (`IKS135`), not a number, so lists show `#IKS135` and the panel sorts newest by Gitee's internal id.
+- Gitee has four states (open, progressing, closed, rejected); the panel's Open covers the first two and Closed the last two, and the issue view shows Gitee's own state name and color.
+- One assignee, not a list: "Assign yourself" replaces whoever had it.
+- No reactions, no timeline endpoint and no linked pull requests, so the issue view shows comments only and says so under Development.
+- The incremental sync asks Gitee for issues updated since the last one (`since`), in either state.
+
 ## What it runs and stores
 
-The mod runs `gh` (on the machine of the space, for remote spaces) and `hc read` on the focused terminal to find issue numbers. It changes issues only when you press a button in the issue view. Its cache lives in `~/.config/herdr-app/data/issues/`, next to the icons, GitHub avatars and issue images it saves there (Herdr doesn't load images from a symlinked mod folder). Images on github.com are fetched with your `gh` token, which only goes to github.com.
+The mod runs `gh` (on the machine of the space, for remote spaces) for GitHub repositories, calls Gitee's API v5 with `fetch` for Gitee ones, and runs `hc read` on the focused terminal to find issue numbers. It changes issues only when you press a button in the issue view. Its cache lives in `~/.config/herdr-app/data/issues/`, next to the icons, avatars and issue images it saves there (Herdr doesn't load images from a symlinked mod folder). Images on github.com are fetched with your `gh` token, which only goes to github.com; your Gitee token only goes to gitee.com.

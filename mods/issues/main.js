@@ -2,8 +2,9 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, notify, props, appHome, shared, setShared } from "herdr";
 import * as fs from "fs/promises";
-import { Viewer, FIELDS, copyMenu } from "./viewer.js";
+import { Viewer, copyMenu } from "./viewer.js";
 import { icons, icon } from "./icons.js";
+import { providerOf, remoteRepo, ORDER } from "./api.js";
 
 // Where the focused pane is, as the Changes panel finds it. A focused mod pane
 // (this one, as a split) has no folder of its own: it keeps the last one.
@@ -20,27 +21,31 @@ const CLOSED = 100;               // and the most recently closed ones
 const SYNC = 30000;               // how often the changes since the last sync are fetched
 const RESYNC = 6 * 3600 * 1000;   // a full fetch now and then catches what search misses (deleted, transferred)
 const MENTIONS = 8;
-const VERSION = 2;                // a cache from another version starts with a full fetch
+const VERSION = 3;                // a cache from another version starts with a full fetch
 const folder = () => `${appHome()}/data/issues`;
-const file = (repo) => `${folder()}/repo-${repo.replace("/", "__")}.json`;
+const file = (provider, repo) => `${folder()}/${provider}-${repo.replace("/", "__")}.json`;
+const skey = (provider, repo) => `${provider}:${repo}`;
 
-// GitHub's own sort orders.
+// GitHub's own sort orders; `order` is the number on GitHub and the id on Gitee.
 const SORTS = {
-  newest: { label: "Newest", by: (a, b) => b.number - a.number },
-  oldest: { label: "Oldest", by: (a, b) => a.number - b.number },
+  newest: { label: "Newest", by: (a, b) => b.order - a.order },
+  oldest: { label: "Oldest", by: (a, b) => a.order - b.order },
   updated: { label: "Recently updated", by: (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) },
   stale: { label: "Least recently updated", by: (a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt) },
-  comments: { label: "Most commented", by: (a, b) => b.comments.length - a.comments.length || b.number - a.number },
+  comments: { label: "Most commented", by: (a, b) => (b.commentCount ?? b.comments.length) - (a.commentCount ?? a.comments.length) || b.order - a.order },
 };
 const sort = () => SORTS[shared("issues.sort")] ? shared("issues.sort") : "newest";
 
-// #123, and links to this repo's issues and pull requests: the lowest line on
-// screen (the newest) first, each line read left to right.
-function mentions(text, repo) {
-  const found = [], pattern = new RegExp(`(?:^|[^\\w&/#])#(\\d{1,5})(?![\\w-])|github\\.com/${repo.replace(/\./g, "\\.")}/(?:issues|pull)/(\\d+)`, "g");
+// #123 (GitHub) or #IKS135 (Gitee), and links to this repo's issues and pull
+// requests: the lowest line on screen (the newest) first, each line read
+// left to right.
+function mentions(text, repo, provider) {
+  const id = provider === "gitee" ? "[A-Za-z][A-Za-z0-9]{3,9}" : "\\d{1,5}";
+  const pattern = new RegExp(`(?:^|[^\\w&/#])#(${id})(?![\\w-])|${provider}\\.com/${repo.replace(/\./g, "\\.")}/(?:issues|pull|pulls)/(${id})`, "g");
+  const found = [];
   for (const line of text.split("\n").reverse()) {
     for (const m of line.matchAll(pattern)) {
-      const n = Number(m[1] ?? m[2]);
+      const n = m[1] ?? m[2];
       if (!found.includes(n)) found.push(n);
     }
   }
@@ -73,9 +78,9 @@ function upsert(store, issues) {
   for (const i of issues) store.known[i.number] = { number: i.number, title: i.title, state: i.state };
 }
 
-async function save(repo, store) {
+async function save(provider, repo, store) {
   await fs.mkdir(folder(), { recursive: true });
-  await fs.writeFile(file(repo), JSON.stringify(store));
+  await fs.writeFile(file(provider, repo), JSON.stringify(store));
 }
 
 // The panel; its Issues button beside the tab bar's Files and Changes (props
@@ -96,7 +101,9 @@ export default class Issues extends View {
     }
     // Per repo: its open and recently closed issues in full, what other numbers are, and when they were synced.
     this.stores = {}; this.repos = remembered("repos"); this.logins = remembered("logins");
-    this.spaceRepos = remembered("spaces"); this.repo = null;
+    // A cache from before Gitee: a bare "owner/name" is a GitHub repo.
+    for (const [id, found] of Object.entries(this.repos)) if (typeof found === "string") this.repos[id] = { provider: "github", repo: found };
+    this.spaceRepos = remembered("spaces"); this.repo = null; this.provider = "github";
     this.query = ""; this.state = "OPEN"; this.mine = false; this.mentioned = []; this.changedAt = shared("issues.changed")?.at;
     this.input = InputState.new({ placeholder: "Filter issues" });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
@@ -125,62 +132,61 @@ export default class Issues extends View {
 
   context() { return JSON.stringify([this.where(), focused()?.space]); }
 
-  // gh resolves the repo from the folder's remotes; a hit is kept per folder.
+  // The folder's remotes decide the platform: a GitHub one wins over a Gitee one.
   async repoFor(cwd, on) {
     const id = JSON.stringify([cwd, on]);
     if (!this.repos[id]) {
-      const r = await exec("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { cwd, on });
-      if (r.code === 0) { this.repos[id] = r.stdout.trim(); localStorage.setItem("repos", JSON.stringify(this.repos)); }
+      const r = await exec("git", ["remote", "-v"], { cwd, on });
+      const remotes = r.code === 0 ? r.stdout.split("\n").map((line) => remoteRepo(line.split(/\s+/)[1] ?? "")).filter(Boolean) : [];
+      const found = ORDER.map((provider) => remotes.find((m) => m.provider === provider)).find(Boolean);
+      if (found) { this.repos[id] = found; localStorage.setItem("repos", JSON.stringify(this.repos)); }
     }
     return this.repos[id] ?? null;
   }
 
-  async login(on) {
-    const id = on ?? "";
+  async login(provider, on) {
+    const id = `${provider}:${on ?? ""}`;
     if (!this.logins[id]) {
-      const r = await exec("gh", ["api", "user", "-q", ".login"], { on });
-      if (r.code === 0) { this.logins[id] = r.stdout.trim(); localStorage.setItem("logins", JSON.stringify(this.logins)); }
+      const me = await providerOf(provider).me({ on });
+      if (me) { this.logins[id] = me; localStorage.setItem("logins", JSON.stringify(this.logins)); }
     }
     return this.logins[id];
   }
 
-  async store(repo) {
-    if (!this.stores[repo]) {
-      const saved = await fs.readFile(file(repo), "utf8").then(JSON.parse).catch(() => null);
-      this.stores[repo] ??= saved ?? { issues: [], known: {}, synced: 0, full: 0 };
+  async store(repo, provider) {
+    const id = skey(provider, repo);
+    if (!this.stores[id]) {
+      const saved = await fs.readFile(file(provider, repo), "utf8").then(JSON.parse).catch(() => null);
+      this.stores[id] ??= saved ?? { issues: [], known: {}, synced: 0, full: 0 };
     }
-    return this.stores[repo];
+    return this.stores[id];
   }
 
   // Everything open plus the latest closed the first time (and every few hours);
   // after that only what changed since the last sync, in either state.
-  async pull(repo, store, on) {
+  async pull(repo, provider, store, on) {
+    const api = providerOf(provider);
     const started = Date.now(), full = store.version !== VERSION || started - store.full > RESYNC;
-    const list = async (args) => {
-      const r = await exec("gh", ["issue", "list", "-R", repo, ...args, "--json", FIELDS], { on });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-      return JSON.parse(r.stdout);
-    };
     let got;
     if (full) {
-      got = [...await list(["--state", "open", "--limit", String(FULL)]), ...await list(["--state", "closed", "--limit", String(CLOSED)])];
+      got = [...await api.issues({ repo, on, state: "open", limit: FULL }), ...await api.issues({ repo, on, state: "closed", limit: CLOSED })];
       store.issues = []; store.full = started; store.version = VERSION;
     } else {
-      const since = new Date(store.synced - 120000).toISOString().slice(0, 19) + "Z";
-      got = await list(["--state", "all", "--limit", "200", "--search", `updated:>=${since}`]);
+      got = await api.issues({ repo, on, state: "all", limit: 200, since: store.synced - 120000 });
     }
     upsert(store, got);
     store.synced = started;
-    await save(repo, store);
+    await save(provider, repo, store);
     return full || got.length > 0;
   }
 
   // Each space shows the repo its own terminals were last in: a folder outside
-  // any GitHub repo (home, say) keeps it, and a space never in one shows none.
+  // any repository (home, say) keeps it, and a space never in one shows none.
   pick(found, space, on) {
-    if (found) { this.spaceRepos[space] = { repo: found, on }; localStorage.setItem("spaces", JSON.stringify(this.spaceRepos)); }
+    if (found) { this.spaceRepos[space] = { ...found, on }; localStorage.setItem("spaces", JSON.stringify(this.spaceRepos)); }
     const choice = this.spaceRepos[space] ?? this.guess(space);
     if ((choice?.repo ?? null) !== this.repo) { this.repo = choice?.repo ?? null; this.mentioned = []; }
+    this.provider = choice?.provider ?? "github";
     this.repoOn = choice?.on ?? null;
   }
 
@@ -189,7 +195,7 @@ export default class Issues extends View {
     const s = spaces().find((x) => x.id === space), tabs = new Set(s?.tabs.map((tab) => tab.id) ?? []), on = s?.machine ?? null;
     for (const p of panes()) {
       const repo = tabs.has(p.tab) && p.cwd ? this.repos[JSON.stringify([p.cwd, on])] : null;
-      if (repo) return { repo, on };
+      if (repo) return { ...repo, on };
     }
     return null;
   }
@@ -210,10 +216,10 @@ export default class Issues extends View {
         this.pick(found, space, on);
         const repo = this.repo;
         if (!repo) return;
-        const store = await this.store(repo);
+        const store = await this.store(repo, this.provider);
         cx.notify();
-        this.me = await this.login(this.repoOn);
-        if (await this.pull(repo, store, this.repoOn)) cx.notify();
+        this.me = await this.login(this.provider, this.repoOn);
+        if (await this.pull(repo, this.provider, store, this.repoOn)) cx.notify();
         if (this.context() === context) this.error = null;
       } catch (e) { if (this.context() === context) this.error = String(e?.message ?? e); }
       finally {
@@ -224,14 +230,14 @@ export default class Issues extends View {
   }
 
   // The dialog changed an issue: fetch just that one, so the list shows it now.
-  changed({ repo, number, on }, cx) {
-    const store = this.stores[repo];
+  changed({ repo, provider, number, on }, cx) {
+    const store = this.stores[skey(provider, repo)];
     if (!store) return;
     cx.spawn(async (cx) => {
-      const r = await exec("gh", ["issue", "view", String(number), "-R", repo, "--json", FIELDS], { on }).catch(() => null);
-      if (r?.code !== 0) return;
-      upsert(store, [JSON.parse(r.stdout)]);
-      await save(repo, store).catch(() => null);
+      const issue = await providerOf(provider).view({ repo, number, on }).catch(() => null);
+      if (!issue) return;
+      upsert(store, [issue]);
+      await save(provider, repo, store).catch(() => null);
       cx.notify();
     });
   }
@@ -239,18 +245,18 @@ export default class Issues extends View {
   // The focused terminal's screen and recent history, for the issues it mentions.
   // A focused mod pane has no terminal: the last one stays.
   scan(cx) {
-    const terminal = (this.terminal = focused()?.terminal ?? this.terminal), repo = this.repo, store = this.stores[repo];
+    const terminal = (this.terminal = focused()?.terminal ?? this.terminal), repo = this.repo, store = this.stores[skey(this.provider, repo)];
     if (this.scanning || !terminal || !store) return;
     this.scanning = true;
     cx.spawn(async (cx) => {
       try {
         const r = await hc(["read", terminal, "--lines", "300"]);
         if (r.code !== 0 || repo !== this.repo) return;
-        const numbers = mentions(r.stdout, repo).filter((n) => store.known[n] !== null);
+        const numbers = mentions(r.stdout, repo, this.provider).filter((n) => store.known[n] !== null);
         for (const n of numbers.slice(0, MENTIONS)) {
           if (n in store.known) continue;
-          const v = await exec("gh", ["issue", "view", String(n), "-R", repo, "--json", "number,title,state"], { on: this.repoOn ?? null });
-          store.known[n] = v.code === 0 ? JSON.parse(v.stdout) : null;
+          const found = await providerOf(this.provider).view({ repo, number: n, on: this.repoOn ?? null }).catch(() => null);
+          store.known[n] = found ? { number: found.number, title: found.title, state: found.state, url: found.url } : null;
         }
         if (repo !== this.repo) return;
         const mentioned = numbers.map((n) => store.known[n]).filter(Boolean).slice(0, MENTIONS);
@@ -260,12 +266,12 @@ export default class Issues extends View {
     });
   }
 
-  issues() { return this.stores[this.repo]?.issues ?? []; }
+  issues() { return this.stores[skey(this.provider, this.repo)]?.issues ?? []; }
 
   // The dialog gets the issue in full when the list has it, so it shows at once.
   open(number) {
     const data = this.issues().find((i) => i.number === number) ?? null;
-    openOverlay({ mod: "issues", kind: "dialog", width: 0.86, height: 0.9, props: { issue: { repo: this.repo, number, on: this.repoOn ?? null, data, me: this.me } } });
+    openOverlay({ mod: "issues", kind: "dialog", width: 0.86, height: 0.9, props: { issue: { repo: this.repo, provider: this.provider, number, on: this.repoOn ?? null, data, me: this.me } } });
   }
 
   shown() {
@@ -279,8 +285,8 @@ export default class Issues extends View {
     const closed = i.state && i.state !== "OPEN";
     return h_flex().id(`${where}-${i.number}`).flex_none().px(10).py(6).gap(8).items_start().rounded(7).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click(() => this.open(i.number))
-      .on_mouse_down("right", () => copyMenu({ repo: this.repo, number: i.number, title: i.title, url: i.url }, "pointer"))
-      .child(div().flex_none().w(40).text_color(closed ? t.ansi5 : t.dim).child(`#${i.number}`))
+      .on_mouse_down("right", () => copyMenu({ repo: this.repo, provider: this.provider, number: i.number, title: i.title, url: i.url }, "pointer"))
+      .child(div().flex_none().w(this.provider === "gitee" ? 62 : 40).text_color(closed ? t.ansi5 : t.dim).child(`#${i.number}`))
       .child(div().flex_1().min_w(0).text_color(closed && where !== "issue" ? t.muted : t.foreground).child(i.title));
   }
 
@@ -326,22 +332,27 @@ export default class Issues extends View {
     const changed = shared("issues.changed");
     if (changed?.at && changed.at !== this.changedAt) { this.changedAt = changed.at; this.changed(changed, cx); }
 
-    const all = this.issues(), list = this.shown(), cached = Boolean(this.stores[this.repo]?.synced);
+    const all = this.issues(), list = this.shown(), cached = Boolean(this.stores[skey(this.provider, this.repo)]?.synced);
     const open = all.filter((i) => i.state === "OPEN").length, closed = all.length - open;
-    const empty = this.error || (!cached ? "Loading issues…"
+    const notFound = !cached ? "Loading issues…"
       : this.query.trim() ? "No issues match"
       : this.mine ? `No ${this.state === "OPEN" ? "open" : "closed"} issues assigned to you`
-      : `No ${this.state === "OPEN" ? "open" : "closed"} issues`);
+      : `No ${this.state === "OPEN" ? "open" : "closed"} issues`;
+    // Gitee's token is what writing needs, and what lifts its 60-an-hour anonymous limit.
+    const empty = this.error && this.provider === "gitee" && !this.me
+      ? `${this.error} · Put a Gitee token in ${providerOf("gitee").tokenPath()} to write issues and stop the 60-an-hour anonymous limit`
+      : this.error || notFound;
     const panel = v_flex().id("issues").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13);
-    // Nothing to show until a terminal in a GitHub repo has had focus once.
+    // Nothing to show until a terminal in a repository has had focus once.
     if (!this.repo) return panel.child(v_flex().flex_1().items_center().justify_center().gap(10).px(36)
       .child(div().size(28).when(this.icons, (e) => e.child(svg(icon("issue")).size(28).text_color(t.dim))))
       .child(div().font_semibold().text_color(t.muted).child(this.syncing ? "Looking for a repository…" : "No repository yet"))
-      .child(div().text_size(12).text_color(t.dim).text_center().child("Focus a terminal inside a GitHub repository and its issues show up here.")));
+      .child(div().text_size(12).text_color(t.dim).text_center().child("Focus a terminal inside a GitHub or Gitee repository and its issues show up here.")));
     return panel
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().size(14).flex_none().when(this.icons, (e) => e.child(svg(icon("issue")).size(14).text_color(t.ansi2))))
         .child(div().font_semibold().child("Issues"))
+        .when(this.provider === "gitee", (e) => e.child(div().h(18).px(6).flex_none().flex().items_center().rounded(5).border_1().border_color(t.border).text_size(10).text_color(t.muted).child("Gitee")))
         .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).text_right().truncate().child(this.repo ?? ""))
         .child(h_flex().id("issues-refresh").h(26).px(8).gap(5).flex_none().items_center().rounded(7).border_1().border_color(t.border).text_size(12).text_color(t.muted)
           .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.refresh(cx); cx.notify(); })
