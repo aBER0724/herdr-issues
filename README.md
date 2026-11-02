@@ -2,16 +2,17 @@
 
 ![Herdr Issues: GitHub and Gitee issues right next to your terminals and coding agents](social.png)
 
-A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. It sits next to Files and Changes in the tab bar, follows the repository of the terminal you're in (github.com or gitee.com), and opens issues in a GitHub-style view where you can comment, edit labels, assign yourself, close and reopen.
+A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. It sits next to Files and Changes in the tab bar, follows the repository of the terminal you're in (github.com or gitee.com), and lists issues and pull requests. Clicking one shows it in the panel itself — no dialog over your terminals — where you can comment, edit labels, assign yourself, close and reopen.
 
 ![Issues panel](preview.png)
 
 - **Follows your focus.** The panel shows the issues of the repository the focused terminal is in, GitHub's or Gitee's; a folder with both remotes shows GitHub's. Each space remembers its own repository, so a terminal outside any repository keeps showing that one.
 - **In this terminal.** Issue numbers (`#123`, or `#IKS135` on Gitee) and issue or pull request links on the focused terminal's screen are listed at the top, newest first, so an agent's "fixed #55" is one click away.
+- **Issues and pull requests.** A switch beside the filter shows either; merged pull requests read as merged, drafts as draft.
 - **Open and closed, sorted your way.** Filter on open or closed, all or assigned to you, or by text, and sort the way GitHub does: newest, oldest, recently updated, least recently updated, most commented.
 - **Copy it.** Copy an issue's link, `owner/repo#123` or `#123` from the issue view, or by right-clicking it in the list (`#IKS135` on Gitee).
 - **Fast.** Issues are cached per repository. After the first fetch, only what changed since the last sync is fetched, every 30 seconds while the panel is open.
-- **A GitHub-style issue view.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants. On Gitee the timeline is its comments, the state pill shows Gitee's own state (意向, 进行中, 已完成, 已拒绝), and linked pull requests aren't listed.
+- **A GitHub-style view, in the panel.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with preview, and a sidebar for assignees, labels, milestone, linked pull requests and participants. On Gitee the timeline is its comments, the state pill shows Gitee's own state (意向, 进行中, 已完成, 已拒绝), and linked pull requests aren't listed. In a narrow panel the sidebar folds into a line under the title; drag the panel wider and it comes back.
 
 ![Issue view](issue.png)
 
@@ -72,6 +73,7 @@ How Gitee differs, and what that means here:
 - Closing as not planned isn't offered: Gitee's API refuses to set its rejected state (it can only close as completed), though issues already rejected read as not planned.
 - No reactions, no timeline endpoint and no linked pull requests, so the issue view shows comments only and says so under Development.
 - The incremental sync asks Gitee for issues updated since the last one (`since`), in either state.
+- Pull requests are numbers there (`!14`, not `#IKS135`), their people are reviewers rather than an assignee (so "Assign yourself" is hidden), and the API reports no comment count, which leaves them out of "Most commented".
 
 ## What it runs and stores
 

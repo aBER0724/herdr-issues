@@ -16,15 +16,16 @@ function location(last) {
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
 }
 
-const FULL = 300;                 // open issues fetched when a repo has no cache yet
+const FULL = 300;                 // open issues (or pull requests) fetched when a repo has no cache yet
 const CLOSED = 100;               // and the most recently closed ones
 const SYNC = 30000;               // how often the changes since the last sync are fetched
 const RESYNC = 6 * 3600 * 1000;   // a full fetch now and then catches what search misses (deleted, transferred)
 const MENTIONS = 8;
 const VERSION = 3;                // a cache from another version starts with a full fetch
+const KIND = { issue: "Issues", pull: "PRs" };
 const folder = () => `${appHome()}/data/issues`;
-const file = (provider, repo) => `${folder()}/${provider}-${repo.replace("/", "__")}.json`;
-const skey = (provider, repo) => `${provider}:${repo}`;
+const file = (provider, repo, kind) => `${folder()}/${provider}-${repo.replace("/", "__")}-${kind}.json`;
+const skey = (provider, repo, kind) => `${provider}:${repo}:${kind}`;
 
 // GitHub's own sort orders; `order` is the number on GitHub and the id on Gitee.
 const SORTS = {
@@ -72,23 +73,23 @@ function remembered(key) {
   try { return JSON.parse(localStorage.getItem(key) ?? "{}"); } catch { return {}; }
 }
 
-function upsert(store, issues) {
-  const changed = new Set(issues.map((i) => i.number));
-  store.issues = [...store.issues.filter((i) => !changed.has(i.number)), ...issues];
-  for (const i of issues) store.known[i.number] = { number: i.number, title: i.title, state: i.state };
+function upsert(store, items) {
+  const changed = new Set(items.map((i) => i.number));
+  store.issues = [...store.issues.filter((i) => !changed.has(i.number)), ...items];
+  for (const i of items) store.known[i.number] = { number: i.number, ref: i.ref, title: i.title, state: i.state };
 }
 
-async function save(provider, repo, store) {
+async function save(provider, repo, kind, store) {
   await fs.mkdir(folder(), { recursive: true });
-  await fs.writeFile(file(provider, repo), JSON.stringify(store));
+  await fs.writeFile(file(provider, repo, kind), JSON.stringify(store));
 }
 
 // The panel; its Issues button beside the tab bar's Files and Changes (props
-// { button: true }); or one issue, the sort menu or the copy menu, as an overlay of the panel.
+// { button: true }); one issue or pull request in place of the list; or the sort
+// menu and the copy menu, as overlays of the panel.
 export default class Issues extends View {
   init(_props, cx) {
-    const { issue, overlay, sortMenu, copyMenu: copying, button } = props() ?? {};
-    if (issue) { this.viewer = new Viewer(issue, overlay, cx); return; }
+    const { overlay, sortMenu, copyMenu: copying, button } = props() ?? {};
     if (sortMenu) { this.menu = overlay; return; }
     if (copying) { this.copying = { ...copying, overlay }; return; }
     if (button) {
@@ -99,20 +100,23 @@ export default class Issues extends View {
       cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
       return;
     }
-    // Per repo: its open and recently closed issues in full, what other numbers are, and when they were synced.
+    // Per repository and kind: its open and recently closed items in full, what
+    // other numbers are, and when they were synced.
     this.stores = {}; this.repos = remembered("repos"); this.logins = remembered("logins");
     // A cache from before Gitee: a bare "owner/name" is a GitHub repo.
     for (const [id, found] of Object.entries(this.repos)) if (typeof found === "string") this.repos[id] = { provider: "github", repo: found };
     this.spaceRepos = remembered("spaces"); this.repo = null; this.provider = "github";
+    this.kind = shared("issues.kind") ?? "issue";
+    this.detailView = null;
     this.query = ""; this.state = "OPEN"; this.mine = false; this.mentioned = []; this.changedAt = shared("issues.changed")?.at;
-    this.input = InputState.new({ placeholder: "Filter issues" });
+    this.input = InputState.new({ placeholder: "Filter" });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(SYNC, (cx) => { if (!hidden()) this.refresh(cx); });
-    cx.timer.every(3000, (cx) => { if (!hidden()) this.scan(cx); });
+    cx.timer.every(3000, (cx) => { if (!hidden() && this.kind === "issue") this.scan(cx); });
   }
 
   toolbar(t) {
@@ -158,10 +162,10 @@ export default class Issues extends View {
     return this.logins[id];
   }
 
-  async store(repo, provider) {
-    const id = skey(provider, repo);
+  async store(repo, provider, kind) {
+    const id = skey(provider, repo, kind);
     if (!this.stores[id]) {
-      const saved = await fs.readFile(file(provider, repo), "utf8").then(JSON.parse).catch(() => null);
+      const saved = await fs.readFile(file(provider, repo, kind), "utf8").then(JSON.parse).catch(() => null);
       this.stores[id] ??= saved ?? { issues: [], known: {}, synced: 0, full: 0 };
     }
     return this.stores[id];
@@ -169,19 +173,19 @@ export default class Issues extends View {
 
   // Everything open plus the latest closed the first time (and every few hours);
   // after that only what changed since the last sync, in either state.
-  async pull(repo, provider, store, on) {
+  async pull(repo, provider, kind, store, on) {
     const api = providerOf(provider);
     const started = Date.now(), full = store.version !== VERSION || started - store.full > RESYNC;
     let got;
     if (full) {
-      got = [...await api.issues({ repo, on, state: "open", limit: FULL }), ...await api.issues({ repo, on, state: "closed", limit: CLOSED })];
+      got = [...await api.items({ kind, repo, on, state: "open", limit: FULL }), ...await api.items({ kind, repo, on, state: "closed", limit: CLOSED })];
       store.issues = []; store.full = started; store.version = VERSION;
     } else {
-      got = await api.issues({ repo, on, state: "all", limit: 200, since: store.synced - 120000 });
+      got = await api.items({ kind, repo, on, state: "all", limit: 200, since: store.synced - 120000 });
     }
     upsert(store, got);
     store.synced = started;
-    await save(provider, repo, store);
+    await save(provider, repo, kind, store);
     return full || got.length > 0;
   }
 
@@ -190,7 +194,7 @@ export default class Issues extends View {
   pick(found, space, on) {
     if (found) { this.spaceRepos[space] = { ...found, on }; localStorage.setItem("spaces", JSON.stringify(this.spaceRepos)); }
     const choice = this.spaceRepos[space] ?? this.guess(space);
-    if ((choice?.repo ?? null) !== this.repo) { this.repo = choice?.repo ?? null; this.mentioned = []; }
+    if ((choice?.repo ?? null) !== this.repo) { this.repo = choice?.repo ?? null; this.mentioned = []; this.showList(); }
     this.provider = choice?.provider ?? "github";
     this.repoOn = choice?.on ?? null;
   }
@@ -208,7 +212,7 @@ export default class Issues extends View {
   refresh(cx) {
     const { cwd, on } = this.where(), context = this.context(), space = focused()?.space;
     if (context !== this.ctx) {
-      // A folder seen before shows its repo's cached issues at once.
+      // A folder seen before shows its repo's cached items at once.
       this.ctx = context; this.error = null;
       this.pick(cwd ? this.repos[JSON.stringify([cwd, on])] : null, space, on);
     }
@@ -219,12 +223,12 @@ export default class Issues extends View {
         const found = cwd ? await this.repoFor(cwd, on) : null;
         if (this.context() !== context) return;
         this.pick(found, space, on);
-        const repo = this.repo;
+        const repo = this.repo, kind = this.kind;
         if (!repo) return;
-        const store = await this.store(repo, this.provider);
+        const store = await this.store(repo, this.provider, kind);
         cx.notify();
         this.me = await this.login(this.provider, this.repoOn);
-        if (await this.pull(repo, this.provider, store, this.repoOn)) cx.notify();
+        if (await this.pull(repo, this.provider, kind, store, this.repoOn)) cx.notify();
         if (this.context() === context) this.error = null;
       } catch (e) { if (this.context() === context) this.error = String(e?.message ?? e); }
       finally {
@@ -234,15 +238,15 @@ export default class Issues extends View {
     });
   }
 
-  // The dialog changed an issue: fetch just that one, so the list shows it now.
-  changed({ repo, provider, number, on }, cx) {
-    const store = this.stores[skey(provider, repo)];
+  // The view changed an item: fetch just that one, so the list shows it now.
+  changed({ repo, provider, kind, number, on }, cx) {
+    const store = this.stores[skey(provider, repo, kind)];
     if (!store) return;
     cx.spawn(async (cx) => {
-      const issue = await providerOf(provider).view({ repo, number, on }).catch(() => null);
-      if (!issue) return;
-      upsert(store, [issue]);
-      await save(provider, repo, store).catch(() => null);
+      const item = await providerOf(provider).view({ kind, repo, number, on }).catch(() => null);
+      if (!item) return;
+      upsert(store, [item]);
+      await save(provider, repo, kind, store).catch(() => null);
       cx.notify();
     });
   }
@@ -250,7 +254,8 @@ export default class Issues extends View {
   // The focused terminal's screen and recent history, for the issues it mentions.
   // A focused mod pane has no terminal: the last one stays.
   scan(cx) {
-    const terminal = (this.terminal = focused()?.terminal ?? this.terminal), repo = this.repo, store = this.stores[skey(this.provider, repo)];
+    const terminal = (this.terminal = focused()?.terminal ?? this.terminal), repo = this.repo;
+    const store = this.stores[skey(this.provider, repo, "issue")];
     if (this.scanning || !terminal || !store) return;
     this.scanning = true;
     cx.spawn(async (cx) => {
@@ -260,39 +265,52 @@ export default class Issues extends View {
         const numbers = mentions(r.stdout, repo, this.provider).filter((n) => store.known[n] !== null);
         for (const n of numbers.slice(0, MENTIONS)) {
           if (n in store.known) continue;
-          const found = await providerOf(this.provider).view({ repo, number: n, on: this.repoOn ?? null }).catch(() => null);
-          store.known[n] = found ? { number: found.number, title: found.title, state: found.state, url: found.url } : null;
+          const found = await providerOf(this.provider).view({ kind: "issue", repo, number: n, on: this.repoOn ?? null }).catch(() => null);
+          store.known[n] = found ? { number: found.number, ref: found.ref, title: found.title, state: found.state, url: found.url } : null;
         }
         if (repo !== this.repo) return;
         const mentioned = numbers.map((n) => store.known[n]).filter(Boolean).slice(0, MENTIONS);
         if (JSON.stringify(mentioned) !== JSON.stringify(this.mentioned)) { this.mentioned = mentioned; cx.notify(); }
-      } catch { /* the terminal closed, or gh is missing: try again next time */ }
+      } catch { /* the terminal closed, or the platform is missing: try again next time */ }
       finally { this.scanning = false; }
     });
   }
 
-  issues() { return this.stores[skey(this.provider, this.repo)]?.issues ?? []; }
+  items() { return this.stores[skey(this.provider, this.repo, this.kind)]?.issues ?? []; }
 
-  // The dialog gets the issue in full when the list has it, so it shows at once.
-  open(number) {
-    const data = this.issues().find((i) => i.number === number) ?? null;
-    openOverlay({ mod: "issues", kind: "dialog", width: 0.86, height: 0.9, props: { issue: { repo: this.repo, provider: this.provider, number, on: this.repoOn ?? null, data, me: this.me } } });
+  // The item in the panel, in place of the list, with Back to the list.
+  open(i, cx) {
+    if (!i) return;
+    this.detailView = new Viewer({
+      repo: this.repo, provider: this.provider, kind: this.kind, number: i.number,
+      on: this.repoOn ?? null, data: i, me: this.me,
+    }, cx, { onBack: (cx) => { this.showList(); cx.notify(); } });
+    cx.notify();
+  }
+
+  showList() { this.detailView = null; }
+
+  setKind(kind, cx) {
+    if (this.kind === kind) return;
+    this.kind = kind; setShared("issues.kind", kind);
+    this.showList(); this.mentioned = []; this.error = null;
+    this.refresh(cx); cx.notify();
   }
 
   shown() {
     const q = this.query.trim().toLowerCase();
-    return this.issues().filter((i) => i.state === this.state
+    return this.items().filter((i) => i.state === this.state
       && (!this.mine || i.assignees.some((a) => a.login === this.me))
-      && (!q || `#${i.number} ${i.title}`.toLowerCase().includes(q))).sort(SORTS[sort()].by);
+      && (!q || `${i.ref} ${i.title}`.toLowerCase().includes(q))).sort(SORTS[sort()].by);
   }
 
-  row(i, t, where = "issue") {
+  row(i, t, where = "item") {
     const closed = i.state && i.state !== "OPEN";
     return h_flex().id(`${where}-${i.number}`).flex_none().px(10).py(6).gap(8).items_start().rounded(7).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click(() => this.open(i.number))
-      .on_mouse_down("right", () => copyMenu({ repo: this.repo, provider: this.provider, number: i.number, title: i.title, url: i.url }, "pointer"))
-      .child(div().flex_none().w(this.provider === "gitee" ? 62 : 40).text_color(closed ? t.ansi5 : t.dim).child(`#${i.number}`))
-      .child(div().flex_1().min_w(0).text_color(closed && where !== "issue" ? t.muted : t.foreground).child(i.title));
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(i, cx))
+      .on_mouse_down("right", () => copyMenu({ repo: this.repo, provider: this.provider, kind: this.kind, number: i.number, ref: i.ref, title: i.title, url: i.url }, "pointer"))
+      .child(div().flex_none().w(i.ref && i.ref.length > 3 ? 62 : 40).text_color(closed ? t.ansi5 : t.dim).child(i.ref ?? `#${i.number}`))
+      .child(div().flex_1().min_w(0).text_color(closed && where !== "item" ? t.muted : t.foreground).child(i.title));
   }
 
   heading(label, t) {
@@ -325,27 +343,28 @@ export default class Issues extends View {
   }
 
   render(cx) {
-    if (this.viewer) return this.viewer.render(cx);
     const t = theme();
     if (this.menu) return this.sortMenu(t);
     if (this.copying) return this.copyMenu(t);
     if (this.button) return this.toolbar(t);
+    if (this.detailView) return this.detailView.render(cx);
     const away = hidden();
-    if (this.away && !away) { this.refresh(cx); this.scan(cx); }
+    if (this.away && !away) { this.refresh(cx); if (this.kind === "issue") this.scan(cx); }
     this.away = away;
     if (!away && this.context() !== this.ctx) this.refresh(cx);
     const changed = shared("issues.changed");
     if (changed?.at && changed.at !== this.changedAt) { this.changedAt = changed.at; this.changed(changed, cx); }
 
-    const all = this.issues(), list = this.shown(), cached = Boolean(this.stores[skey(this.provider, this.repo)]?.synced);
+    const all = this.items(), list = this.shown(), cached = Boolean(this.stores[skey(this.provider, this.repo, this.kind)]?.synced);
     const open = all.filter((i) => i.state === "OPEN").length, closed = all.length - open;
-    const notFound = !cached ? "Loading issues…"
-      : this.query.trim() ? "No issues match"
-      : this.mine ? `No ${this.state === "OPEN" ? "open" : "closed"} issues assigned to you`
-      : `No ${this.state === "OPEN" ? "open" : "closed"} issues`;
+    const noun = this.kind === "pull" ? "pull requests" : "issues";
+    const notFound = !cached ? "Loading…"
+      : this.query.trim() ? "Nothing matches"
+      : this.mine ? `No ${this.state === "OPEN" ? "open" : "closed"} ${noun} assigned to you`
+      : `No ${this.state === "OPEN" ? "open" : "closed"} ${noun}`;
     // Gitee's token is what writing needs, and what lifts its 60-an-hour anonymous limit.
     const empty = this.error && this.provider === "gitee" && !this.me
-      ? `${this.error} · Put a Gitee token in ${providerOf("gitee").tokenPath()} to write issues and stop the 60-an-hour anonymous limit`
+      ? `${this.error} · Put a Gitee token in ${providerOf("gitee").tokenPath()} to write and stop the 60-an-hour anonymous limit`
       : this.error || notFound;
     const panel = v_flex().id("issues").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13);
     // Nothing to show until a terminal in a repository has had focus once.
@@ -375,17 +394,20 @@ export default class Issues extends View {
             .child(SORTS[sort()].label.replace(/ updated$/, "")).child(div().text_size(9).child("▼"))))
         .child(h_flex().gap(6).items_center()
           .child(h_flex().flex_none().p(2).gap(2).rounded(8).border_1().border_color(t.border)
-            .child(this.segment("state-open", cached ? `Open ${open >= FULL ? `${FULL}+` : open}` : "Open", this.state === "OPEN", t, (_e, cx) => { this.state = "OPEN"; cx.notify(); }))
-            .child(this.segment("state-closed", cached ? `Closed ${closed}` : "Closed", this.state === "CLOSED", t, (_e, cx) => { this.state = "CLOSED"; cx.notify(); })))
+            .child(this.segment("kind-issue", KIND.issue, this.kind === "issue", t, (_e, cx) => this.setKind("issue", cx)))
+            .child(this.segment("kind-pull", KIND.pull, this.kind === "pull", t, (_e, cx) => this.setKind("pull", cx))))
           .child(div().flex_1())
           .child(h_flex().flex_none().p(2).gap(2).rounded(8).border_1().border_color(t.border)
             .child(this.segment("filter-all", "All", !this.mine, t, (_e, cx) => { this.mine = false; cx.notify(); }))
-            .child(this.segment("filter-mine", "Mine", this.mine, t, (_e, cx) => { this.mine = true; cx.notify(); })))))
+            .child(this.segment("filter-mine", "Mine", this.mine, t, (_e, cx) => { this.mine = true; cx.notify(); }))))
+        .child(h_flex().flex_none().p(2).gap(2).rounded(8).border_1().border_color(t.border)
+          .child(this.segment("state-open", cached ? `Open ${open >= FULL ? `${FULL}+` : open}` : "Open", this.state === "OPEN", t, (_e, cx) => { this.state = "OPEN"; cx.notify(); }))
+          .child(this.segment("state-closed", cached ? `Closed ${closed}` : "Closed", this.state === "CLOSED", t, (_e, cx) => { this.state = "CLOSED"; cx.notify(); }))))
       .child(v_flex().id("issues-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(1)
         .when(Boolean(this.error) && list.length > 0, (e) => e.child(div().px(10).py(4).text_size(11).text_color(t.ansi1).child(this.error)))
-        .when(this.mentioned.length > 0, (e) => e.child(this.heading("In this terminal", t))
+        .when(this.mentioned.length > 0 && this.kind === "issue", (e) => e.child(this.heading("In this terminal", t))
           .children(this.mentioned.map((i) => this.row(i, t, "mentioned")))
-          .child(this.heading(`${this.state === "OPEN" ? "Open" : "Closed"} issues${this.mine ? " assigned to you" : ""}`, t)))
+          .child(this.heading(`${this.state === "OPEN" ? "Open" : "Closed"} ${noun}${this.mine ? " assigned to you" : ""}`, t)))
         .children(list.map((i) => this.row(i, t)))
         .when(!list.length, (e) => e.child(div().px(16).py(28).text_size(12).text_center().text_color(this.error ? t.ansi1 : t.dim).child(empty))));
   }

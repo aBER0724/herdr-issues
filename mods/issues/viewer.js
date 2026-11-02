@@ -1,12 +1,12 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
-import { exec, theme, openOverlay, closeOverlay, setShared } from "herdr";
+import { exec, theme, openOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
 import { blocks, picture, failed, loadPicture } from "./pictures.js";
 import { providerOf, providerAt } from "./api.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const ISSUE_URL = /^https:\/\/(github\.com|gitee\.com)\/([\w.-]+\/[\w.-]+?)\/(?:issues|pull|pulls)\/([\w-]+)(?:[/?#].*)?$/;
+const ISSUE_URL = /^https:\/\/(github\.com|gitee\.com)\/([\w.-]+\/[\w.-]+?)\/(issues|pull|pulls)\/([\w-]+)(?:[/?#].*)?$/;
 // GitHub's own state colors, the same in every theme so they read as GitHub's.
 const GITHUB = { open: "#238636", done: "#8957e5", skipped: "#6e7681", link: "#4493f8" };
 const EMOJI = {
@@ -89,9 +89,11 @@ function timeline(raw) {
 }
 
 // Copy link, with the reference and number beside it: a popup of the panel's mod.
-export function copyMenu({ repo, provider, number, title, url }, at) {
+export function copyMenu({ repo, provider, kind, number, ref, title, url }, at) {
+  const base = `${providerOf(provider).web}/${repo}/${kind === "pull" ? "pulls" : "issues"}/${number}`;
+  const copyRef = kind === "pull" ? `${repo}!${number}` : `${repo}${ref ?? `#${number}`}`;
   openOverlay({ mod: "issues", kind: "popup", width: 300, height: 222, ...(at ? { at } : {}),
-    props: { copyMenu: { url: url ?? `${providerOf(provider).web}/${repo}/issues/${number}`, ref: `${repo}#${number}`, number: `#${number}`, title: title ? `#${number} ${title}` : null } } });
+    props: { copyMenu: { url: url ?? base, ref: copyRef, number: ref ?? `#${number}`, title: title ? `${ref ?? `#${number}`} ${title}` : null } } });
 }
 
 // A label as GitHub tints it: its color faint behind, its color as text unless too dark to read.
@@ -102,68 +104,68 @@ export function labelChip(l, t) {
     .text_size(12).font_semibold().text_color(light ? `#${l.color}` : t.foreground).child(l.name);
 }
 
-// One issue in a dialog: { repo, provider, number, on, data?, me? } from the panel. With
-// data (the panel's cached copy) it shows at once; the full issue and its
-// timeline load behind it. Links to other issues and pull requests open here
-// too, with Back to return.
+// One issue or pull request where the panel's list was: { repo, provider, kind,
+// number, data?, me? } from the panel, with Back to the list. Links to other
+// items open here too, with Back to return.
 export class Viewer {
-  constructor({ repo, number, provider, on, data, me }, overlay, cx) {
-    this.repo = repo; this.number = number; this.on = on; this.me = me; this.overlay = overlay;
-    this.api = providerOf(provider);
+  constructor({ repo, kind, provider, number, on, data, me }, cx, { onBack }) {
+    this.repo = repo; this.number = number; this.kind = kind ?? "issue"; this.on = on; this.me = me;
+    this.api = providerOf(provider); this.onBack = onBack;
     this.history = []; this.cache = {}; this.timelines = {}; this.labels = {}; this.tab = "write";
-    if (data) this.cache[`${repo}#${number}`] = data;
-    this.reply = TextareaState.new({ placeholder: "Use Markdown to format your comment" });
-    this.reply.set_auto_grow(4, 14);
+    if (data) this.cache[`${this.kind}:${repo}#${number}`] = data;
+    this.reply = TextareaState.new({ placeholder: "Leave a comment" });
+    this.reply.set_auto_grow(3, 12);
     this.reply.on("change", (_e, cx) => { const has = Boolean(this.reply.value().trim()); if (has !== this.replying) { this.replying = has; cx.notify(); } });
     this.reply.on("submit", (e, cx) => { if (e.secondary) this.comment(cx); });
     cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
     this.load(cx);
   }
 
-  id() { return `${this.repo}#${this.number}`; }
+  id() { return `${this.kind}:${this.repo}#${this.number}`; }
 
   load(cx) {
-    const repo = this.repo, number = this.number, id = this.id(), on = this.on, api = this.api, current = () => this.id() === id;
+    const repo = this.repo, number = this.number, kind = this.kind, id = this.id(), on = this.on, api = this.api;
+    const current = () => this.id() === id;
     this.issue = this.cache[id] ?? null; this.error = null; this.loading = true;
     cx.spawn(async (cx) => {
       try {
-        const [issue, raw] = await Promise.all([
-          api.view({ repo, number, on }),
-          api.timeline({ repo, number, on }).catch(() => null),
+        const [item, raw] = await Promise.all([
+          api.view({ kind, repo, number, on }),
+          api.timeline({ kind, repo, number, on }).catch(() => null),
         ]);
-        this.cache[id] = issue;
+        this.cache[id] = item;
         if (raw) this.timelines[id] = timeline(raw);
-        if (current()) this.issue = issue;
+        if (current()) this.issue = item;
       } catch (e) { if (current()) this.error = String(e?.message ?? e); }
       finally { if (current()) { this.loading = false; cx.notify(); } }
     });
   }
 
-  go(repo, number, cx) {
-    if (repo === this.repo && number === this.number) return;
-    this.history.push({ repo: this.repo, number: this.number });
-    this.repo = repo; this.number = number; this.editing = false; this.closeMenu = false;
+  go(repo, kind, number, cx) {
+    if (repo === this.repo && kind === this.kind && number === this.number) return;
+    this.history.push({ repo: this.repo, kind: this.kind, number: this.number });
+    this.repo = repo; this.kind = kind; this.number = number; this.editing = false; this.closeMenu = false;
     this.load(cx); cx.notify();
   }
 
   back(cx) {
     const prev = this.history.pop();
-    if (!prev) return;
-    this.repo = prev.repo; this.number = prev.number; this.editing = false; this.closeMenu = false;
+    if (!prev) { this.onBack(cx); return; }
+    this.repo = prev.repo; this.kind = prev.kind; this.number = prev.number; this.editing = false; this.closeMenu = false;
     this.load(cx); cx.notify();
   }
 
   link(url, cx) {
     const m = ISSUE_URL.exec(url);
-    if (m && providerAt(m[1]) === this.api.name) this.go(m[2], m[3], cx);
+    if (m && providerAt(m[1]) === this.api.name) this.go(m[2], m[3] === "issues" ? "issue" : "pull", m[4], cx);
     else openUrl(url);
   }
 
-  // Runs the change on this issue through its platform, then reloads it and
+  // Runs the change on this item through its platform, then reloads it and
   // tells the panel.
   change(label, work, cx, after) {
     if (this.busy) return;
-    const repo = this.repo, provider = this.api.name, number = this.number, id = this.id();
+    const repo = this.repo, provider = this.api.name, kind = this.kind, number = this.number, id = this.id();
     this.busy = label; this.error = null; this.closeMenu = false;
     cx.spawn(async (cx) => {
       try {
@@ -172,7 +174,7 @@ export class Viewer {
       } catch (e) { this.error = String(e?.message ?? e); }
       finally {
         this.busy = null;
-        setShared("issues.changed", { repo, provider, number, on: this.on, at: Date.now() });
+        setShared("issues.changed", { repo, provider, kind, number, on: this.on, at: Date.now() });
         if (this.id() === id) this.load(cx);
         cx.notify();
       }
@@ -184,13 +186,13 @@ export class Viewer {
 
   comment(cx) {
     const body = this.reply.value().trim();
-    if (body) this.change("Commenting", () => this.api.comment({ repo: this.repo, number: this.number, body, on: this.on }), cx, () => this.cleared());
+    if (body) this.change("Commenting", () => this.api.comment({ kind: this.kind, repo: this.repo, number: this.number, body, on: this.on }), cx, () => this.cleared());
   }
 
   // Closing or reopening takes what's in the comment box along, as on GitHub.
   setState(close, reason, cx) {
     const body = this.reply.value().trim();
-    this.change(close ? "Closing" : "Reopening", () => this.api.setState({ repo: this.repo, number: this.number, close, reason, body, on: this.on }), cx, () => this.cleared());
+    this.change(close ? "Closing" : "Reopening", () => this.api.setState({ kind: this.kind, repo: this.repo, number: this.number, close, reason, body, on: this.on }), cx, () => this.cleared());
   }
 
   // Shows the change at once; the reload after the platform confirms it.
@@ -198,7 +200,7 @@ export class Viewer {
     const has = this.issue.labels.some((x) => x.name === l.name);
     this.issue.labels = has ? this.issue.labels.filter((x) => x.name !== l.name) : [...this.issue.labels, l];
     const labels = this.issue.labels.map((x) => x.name);
-    this.change("Saving labels", () => this.api.toggleLabel({ repo: this.repo, number: this.number, name: l.name, add: !has, labels, on: this.on }), cx);
+    this.change("Saving labels", () => this.api.toggleLabel({ kind: this.kind, repo: this.repo, number: this.number, name: l.name, add: !has, labels, on: this.on }), cx);
   }
 
   editLabels(cx) {
@@ -275,7 +277,7 @@ export class Viewer {
     if (!p) return div().h(failed(b.image) ? 36 : 120).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.raised)
       .flex().items_center().justify_center().px(12).text_size(12).text_color(t.muted).truncate()
       .child(failed(b.image) ? `Image could not be loaded${b.alt ? `: ${b.alt}` : ""}` : "Loading image…");
-    const room = Math.max(240, (this.width ?? 1100) - 380), w = Math.min(b.width ?? p.width, room), h = Math.round(p.height * w / p.width);
+    const room = Math.max(240, (this.width ?? 1100) - 60), w = Math.min(b.width ?? p.width, room), h = Math.round(p.height * w / p.width);
     return div().id(key).flex_none().cursor_pointer().on_click(() => openUrl(p.file)).child(image(p.path).w(w).h(h).rounded(6));
   }
 
@@ -330,13 +332,15 @@ export class Viewer {
     const items = this.timelines[this.id()]
       ?? i.comments.map((c) => ({ kind: "comment", login: login(c.author), at: c.createdAt, body: c.body, role: c.authorAssociation, reactions: reactions(c.reactionGroups) }));
     const first = { kind: "comment", first: true, login: login(i.author), avatar: i.author?.avatarUrl, at: i.createdAt, body: i.body, reactions: reactions(i.reactionGroups) };
-    return [this.card("issue-body", first, t, cx), ...items.flatMap((e, n) => [this.joint(t),
-      e.kind === "comment" ? this.card(`issue-comment-${n}`, e, t, cx) : this.event(`issue-event-${n}`, e, t, cx)])];
+    return [this.card("item-body", first, t, cx), ...items.flatMap((e, n) => [this.joint(t),
+      e.kind === "comment" ? this.card(`item-comment-${n}`, e, t, cx) : this.event(`item-event-${n}`, e, t, cx)])];
   }
 
   composer(i, t, cx) {
     const open = i.state === "OPEN", busy = Boolean(this.busy), text = Boolean(this.replying);
-    const tab = (id, label) => div().id(`issue-tab-${id}`).h(32).px(14).flex().items_center().rounded_t(6).text_size(13).cursor_pointer()
+    // Gitee's API can't set its rejected state, and a pull request has no reason.
+    const reasons = this.kind === "issue" && this.api.name !== "gitee";
+    const tab = (id, label) => div().id(`item-tab-${id}`).h(32).px(14).flex().items_center().rounded_t(6).text_size(13).cursor_pointer()
       .when(this.tab === id, (e) => e.bg(t.background).border_1().border_b(0).border_color(t.border).text_color(t.foreground))
       .when(this.tab !== id, (e) => e.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
       .on_click((_e, cx) => { this.tab = id; cx.notify(); }).child(label);
@@ -346,22 +350,21 @@ export class Viewer {
         .child(h_flex().px(8).pt(8).gap(4).items_end().bg(t.raised).border_b(1).border_color(t.border)
           .child(tab("write", "Write")).child(tab("preview", "Preview")))
         .child(this.tab === "write"
-          ? div().id("issue-reply").px(12).py(10).bg(t.background).cursor_text().child(Textarea.new(this.reply).w_full().text_size(14).text_color(t.foreground))
+          ? div().id("item-reply").px(12).py(10).bg(t.background).cursor_text().child(Textarea.new(this.reply).w_full().text_size(14).text_color(t.foreground))
           : div().px(16).py(14).min_h(110).bg(t.background).text_size(14).child(text
-            ? TextView.markdown("issue-preview", linkify(this.reply.value(), this.repo, this.api)).on_link_click((url, cx) => this.link(url, cx))
+            ? TextView.markdown("item-preview", linkify(this.reply.value(), this.repo, this.api)).on_link_click((url, cx) => this.link(url, cx))
             : div().text_color(t.muted).child("Nothing to preview")))
         .child(h_flex().px(12).py(10).gap(8).items_center().bg(t.background).border_t(1).border_color(t.border)
-          .child(div().flex_1().text_size(12).text_color(t.muted).child("Markdown is supported · Ctrl+Enter comments"))
+          .child(div().flex_1().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments"))
           .child(open
             ? h_flex().gap(0)
-              .child(this.button("issue-close-done", text ? "Close with comment" : "Close issue", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
-              .when(this.api.name !== "gitee", (e) => e.child(this.button("issue-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
-            : this.button("issue-reopen", text ? "Reopen with comment" : "Reopen issue", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
-          .child(this.button("issue-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
-        // Gitee's API won't set its rejected state, so "not planned" isn't offered there.
-        .when(open && Boolean(this.closeMenu) && this.api.name !== "gitee", (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
+              .child(this.button("item-close-done", text ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
+              .when(reasons, (e) => e.child(this.button("item-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
+            : this.button("item-reopen", text ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
+          .child(this.button("item-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
+        .when(open && Boolean(this.closeMenu) && reasons, (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
           .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
-            .map(([glyph, title, note, reason, tint]) => h_flex().id(`issue-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
+            .map(([glyph, title, note, reason, tint]) => h_flex().id(`item-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
               .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setState(true, reason, cx))
               .child(div().pt(2).child(this.glyph(glyph, 16, tint)))
               .child(v_flex().child(div().text_size(13).font_semibold().child(title)).child(div().text_size(12).text_color(t.muted).child(note))))))));
@@ -375,19 +378,20 @@ export class Viewer {
   }
 
   sidebar(i, t, cx) {
-    const pr = i.url.includes("/pull/"), mine = i.assignees.some((a) => a.login === this.me), all = this.labels[this.repo];
+    const pull = this.kind === "pull", mine = i.assignees.some((a) => a.login === this.me), all = this.labels[this.repo];
+    const assignable = this.api.assignable(this.kind);
     const none = (text) => div().text_size(12).text_color(t.muted).child(text);
     const action = (id, label, onClick) => div().id(id).text_size(12).font_normal().text_color(GITHUB.link).cursor_pointer().hover((s) => s.underline()).on_click(onClick).child(label);
     // Everyone who wrote or did something here, in order of appearance, people only.
     const people = new Map();
     for (const [name, url] of [[login(i.author), i.author?.avatarUrl], ...i.comments.map((c) => [login(c.author)]), ...(this.timelines[this.id()] ?? []).map((e) => [e.login, e.avatar])])
       if (!bot(name)) people.set(name, people.get(name) ?? url ?? null);
-    const prs = i.closedByPullRequestsReferences ?? [];
-    return v_flex().id("issue-sidebar").w(264).flex_none().min_h(0).overflow_y_scrollbar().pl(8).pr(24).pt(6)
-      .child(this.section("Assignees", t, i.assignees.length
+    const linked = this.kind === "issue" ? i.closedByPullRequestsReferences ?? [] : i.closingIssuesReferences ?? [];
+    return v_flex().id("item-sidebar").w(264).flex_none().min_h(0).overflow_y_scrollbar().pl(8).pr(24).pt(6)
+      .when(assignable, (e) => e.child(this.section(pull ? "Reviewers" : "Assignees", t, i.assignees.length
         ? v_flex().gap(8).children(i.assignees.map((a) => h_flex().gap(8).items_center().text_size(13).font_semibold().child(this.pic(a.login, null, 20, t, cx)).child(a.login)))
-        : h_flex().gap(4).child(none("No one ·")).when(!pr && Boolean(this.me), (e) => e.child(action("issue-assign", "Assign yourself", (_e, cx) => this.change("Assigning", () => this.api.assign({ repo: this.repo, number: this.number, assign: true, on: this.on }), cx)))),
-        !pr && mine ? action("issue-unassign", "Unassign me", (_e, cx) => this.change("Unassigning", () => this.api.assign({ repo: this.repo, number: this.number, assign: false, on: this.on }), cx)) : null))
+        : h_flex().gap(4).child(none("No one ·")).when(!pull && Boolean(this.me), (e2) => e2.child(action("item-assign", "Assign yourself", (_e, cx) => this.change("Assigning", () => this.api.assign({ kind: this.kind, repo: this.repo, number: this.number, assign: true, on: this.on }), cx)))),
+        !pull && mine ? action("item-unassign", "Unassign me", (_e, cx) => this.change("Unassigning", () => this.api.assign({ kind: this.kind, repo: this.repo, number: this.number, assign: false, on: this.on }), cx)) : null)))
       .child(this.section("Labels", t, this.editing
         ? (!all ? none("Loading labels…") : v_flex().gap(1).children(all.map((l) => {
           const on = i.labels.some((x) => x.name === l.name);
@@ -399,58 +403,66 @@ export class Viewer {
               .when(Boolean(l.description), (e) => e.child(div().text_size(12).text_color(t.muted).truncate().child(l.description))));
         })))
         : i.labels.length ? h_flex().gap(4).flex_wrap().children(i.labels.map((l) => labelChip(l, t))) : none("No labels"),
-        pr ? null : action("issue-labels-edit", this.editing ? "Done" : "Edit", (_e, cx) => this.editLabels(cx))))
+        action("item-labels-edit", this.editing ? "Done" : "Edit", (_e, cx) => this.editLabels(cx))))
       .child(this.section("Milestone", t, i.milestone?.title
         ? h_flex().gap(6).items_center().text_size(13).font_semibold().child(this.glyph("milestone", 14, t.muted)).child(i.milestone.title)
         : none("No milestone")))
-      .child(this.section("Development", t, prs.length
-        ? v_flex().gap(8).children(prs.map((p) => h_flex().id(`issue-pr-${p.number}`).gap(8).items_start().cursor_pointer().text_size(13)
+      .when(linked.length > 0 || !pull, (e) => e.child(this.section(pull ? "Closes" : "Development", t, linked.length
+        ? v_flex().gap(8).children(linked.map((p) => h_flex().id(`item-link-${p.number}`).gap(8).items_start().cursor_pointer().text_size(13)
           .on_click((_e, cx) => this.link(p.url, cx))
-          .child(div().pt(1).child(this.glyph("pull", 14, GITHUB.done)))
+          .child(div().pt(1).child(this.glyph(pull ? "issue" : "pull", 14, GITHUB.done)))
           .child(v_flex().child(div().font_semibold().hover((s) => s.text_color(GITHUB.link)).child(`#${p.number}`))
-            .child(div().text_size(12).text_color(t.muted).child(`${p.repository?.owner?.login}/${p.repository?.name}`)))))
-        : none(this.api.name === "gitee" ? "Gitee doesn't list these" : "No branches or pull requests")))
+            .child(div().text_size(12).text_color(t.muted).child(p.repository?.name ?? "")))))
+        : none(this.api.name === "gitee" ? "Gitee doesn't list these" : "No branches or pull requests"))))
       .child(this.section("Participants", t, h_flex().gap(4).flex_wrap().children([...people].slice(0, 18).map(([name, url]) => this.pic(name, url, 24, t, cx)))));
+  }
+
+  // Narrow (the side panel): the meta that the sidebar would hold, under the title.
+  meta(i, t) {
+    return h_flex().gap(6).items_center().flex_wrap().text_size(12)
+      .children(i.labels.map((l) => labelChip(l, t)))
+      .when(Boolean(i.milestone?.title), (e) => e.child(div().text_color(t.muted).child(i.milestone.title)))
+      .when(i.assignees.length > 0, (e) => e.child(div().text_color(t.muted).child(i.assignees.map((a) => a.login).join(", "))));
   }
 
   render(cx) {
     const t = theme(), i = this.issue;
+    const narrow = (this.width ?? 600) < 620;
+    const pad = narrow ? 14 : 32;
     const bar = h_flex().h(32).gap(8).items_center()
-      .when(this.history.length > 0, (e) => e.child(this.button("issue-back", "Back", t, (_e, cx) => this.back(cx), { glyph: "back" })))
-      .child(div().text_size(13).text_color(t.muted).child(i?.url.includes("/pull/") ? `${this.repo} · pull request` : this.repo))
+      .child(this.button("item-back", this.history.length > 0 ? "Back" : "List", t, (_e, cx) => this.back(cx), { glyph: "back" }))
+      .child(div().text_size(13).text_color(t.muted).truncate().child(this.kind === "pull" ? `${this.repo} · pull request` : this.repo))
       .child(div().flex_1().min_w(0).text_size(12).text_color(t.ansi1).truncate().child(i && this.error ? this.error : ""))
       .when(this.loading || Boolean(this.busy), (e) => e.child(h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
-        .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(this.busy ?? "Refreshing")))
-      .when(Boolean(i) && !this.loading && !this.busy, (e) => e.child(this.button("issue-refresh", "Refresh", t, (_e, cx) => { this.load(cx); cx.notify(); }, { glyph: "refresh" })))
-      .when(Boolean(i), (e) => e.child(this.button("issue-copy", "Copy", t, () => copyMenu({ repo: this.repo, provider: this.api.name, number: i.number, title: i.title, url: i.url }), { glyph: "copy" })))
-      .when(Boolean(i), (e) => e.child(this.button("issue-github", `Open on ${this.api.label}`, t, () => openUrl(i.url), { glyph: "external" })))
-      .child(this.button("issue-close", "", t, () => closeOverlay(this.overlay), { glyph: "close" }));
-    if (!i) return v_flex().id("issue").size_full().bg(t.background).text_color(t.foreground).text_size(14).px(32).pt(16).gap(20)
+        .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(this.busy ?? "Loading")))
+      .when(Boolean(i) && !this.loading && !this.busy, (e) => e.child(this.button("item-refresh", "", t, (_e, cx) => { this.load(cx); cx.notify(); }, { glyph: "refresh" })))
+      .when(Boolean(i), (e) => e.child(this.button("item-copy", "", t, () => copyMenu({ repo: this.repo, provider: this.api.name, kind: this.kind, number: i.number, ref: i.ref, title: i.title, url: i.url }), { glyph: "copy" })))
+      .when(Boolean(i), (e) => e.child(this.button("item-open-web", "", t, () => openUrl(i.url), { glyph: "external" })));
+    if (!i) return v_flex().id("item").size_full().bg(t.background).text_color(t.foreground).text_size(14).px(pad).pt(16).gap(20)
       .child(bar)
       .child(this.loading ? div().text_color(t.muted).child(`Loading #${this.number}…`) : div().text_color(t.ansi1).child(this.error ?? ""));
 
-    const pr = i.url.includes("/pull/");
-    const [state, color, glyph] = i.state === "OPEN" ? [i.stateText ?? "Open", i.stateColor ?? GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", GITHUB.done, "pull"]
+    const pull = this.kind === "pull";
+    const ref = i.ref ?? `#${i.number}`;
+    const [state, color, glyph] = i.state === "OPEN" ? [i.stateText ?? "Open", i.stateColor ?? GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", i.stateColor ?? GITHUB.done, "pull"]
       : i.stateReason === "NOT_PLANNED" ? [i.stateText ?? "Closed", i.stateColor ?? GITHUB.skipped, "skipped"] : [i.stateText ?? "Closed", i.stateColor ?? GITHUB.done, "done"];
-    return v_flex().id("issue").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(14)
-      .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
-      .child(v_flex().flex_none().px(32).pt(14).pb(18).gap(14).border_b(1).border_color(t.border)
+    return v_flex().id("item").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(14)
+      .on_size_change((size, cx) => { if (Math.abs((this.width ?? 0) - size.width) > 1) { this.width = size.width; cx.notify(); } })
+      .child(v_flex().flex_none().px(pad).pt(12).pb(14).gap(10).border_b(1).border_color(t.border)
         .child(bar)
-        // Word by word, so the title wraps like text with the number after its last word.
-        .child(h_flex().flex_wrap().gap_x(8).text_size(30).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
-          .child(div().text_color(t.muted).child(`#${i.number}`)))
+        // Word by word, so the title wraps like text with the reference after its last word.
+        .child(h_flex().flex_wrap().gap_x(8).text_size(narrow ? 20 : 28).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
+          .child(div().text_color(t.muted).child(ref)))
         .child(h_flex().gap(8).items_center().flex_wrap()
-          .child(h_flex().h(32).px(12).gap(6).items_center().rounded(16).bg(color).text_color("#ffffff").text_size(14).font_semibold()
-            .child(this.glyph(glyph, 16, "#ffffff")).child(state))
-          .children((i.closedByPullRequestsReferences ?? []).map((p) => h_flex().id(`issue-pill-${p.number}`).h(32).px(12).gap(6).items_center().rounded(16)
-            .border_1().border_color(t.border).text_size(13).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => this.link(p.url, cx)).child(this.glyph("pull", 14, GITHUB.done)).child(`#${p.number}`)))
-          .when(pr, (e) => e.child(div().text_size(13).text_color(t.muted).child("Pull request")))))
+          .child(h_flex().h(narrow ? 26 : 32).px(narrow ? 9 : 12).gap(6).items_center().rounded(narrow ? 13 : 16).bg(color).text_color("#ffffff").text_size(narrow ? 12 : 14).font_semibold()
+            .child(this.glyph(glyph, narrow ? 13 : 16, "#ffffff")).child(state))
+          .when(pull, (e) => e.child(div().text_size(12).text_color(t.muted).child("Pull request"))))
+        .when(narrow && (i.labels.length > 0 || i.milestone?.title || i.assignees.length > 0), (e) => e.child(this.meta(i, t))))
       .child(h_flex().flex_1().min_h(0).items_start()
-        .child(v_flex().id(`issue-thread-${this.id()}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().pl(32).pr(24).py(20)
+        .child(v_flex().id(`item-thread-${this.id()}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().pl(pad).pr(narrow ? pad : 24).py(16)
           .children(this.thread(i, t, cx))
-          .when(!pr, (e) => e.child(div().flex_none().h(28)).child(this.composer(i, t, cx)))
+          .child(div().flex_none().h(24)).child(this.composer(i, t, cx))
           .child(div().flex_none().h(24)))
-        .child(this.sidebar(i, t, cx)));
+        .when(!narrow, (e) => e.child(this.sidebar(i, t, cx))));
   }
 }
