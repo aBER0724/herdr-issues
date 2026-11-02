@@ -146,6 +146,13 @@ export const gitee = {
     return kind === "pull" ? pull(row, repo) : issue(row, repo);
   },
 
+  // A new issue: Gitee wants the repository's name in the body as well as in the
+  // path, and answers with the row itself.
+  async create({ repo, title, body }) {
+    const [owner, name] = repo.split("/");
+    return issue(await request(`/repos/${owner}/issues`, { method: "POST", body: { repo: name, title, body } }), repo);
+  },
+
   // Gitee has no timeline endpoint: its comments are it. A pull request's list
   // also holds the code review comments, which have a file path and no place
   // in a conversation.

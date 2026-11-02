@@ -50,6 +50,8 @@ A side panel beside Files and Changes that lists the issues and pull requests of
 
 - Herdr doesn't draw SVGs or images from a symlinked mod folder (JavaScript loads fine), so icons and avatars live in the data folder and are drawn only once they're on disk; drawing a missing file first would leave it blank.
 - The markdown view (`TextView.markdown`) draws no images at all, not even the alt text.
+- Writing an issue: `gh issue create -R <repo> --title .. --body ..` prints the new issue's URL and nothing else, so the number is its tail; Gitee wants `repo` (the name without the owner) in the body of `POST /repos/{owner}/issues` and answers with the row. Gitee's API has no way to delete an issue (DELETE answers 405 Not Allowed): a test issue has to be deleted from the web UI's 删除 · 确认, or closed and left there.
+- A panel's mod instance survives a layout switch back to the same layout: new code only reaches it through a *different* layout name (a copy of the file), which is also the only way to see a change without a click.
 - `space.new` is the whole of "start an agent here": `{ name, folder, tab, argv, task, machine }`, where `argv` is the program as an array (`agent.run` from `knownAgents()`) and `task` is its first message. The shipped worktree mod uses `{ folder, tab, argv }` and has no `task`, so a dialog-driven worktree cannot hand the agent its brief.
 - A mod's `fs` writes are limited to its granted roots: writing `/tmp` or even `appHome()/data/...` can be refused under `herdr-app check` while `exec("sh", ...)` runs with the real environment. For a trace, `exec` a heredoc; for the payload, `exec` a `cat > file`.
 - Worktrees: `<home>/.herdr/worktrees/<repo>/<branch with slashes as dashes>`, made with `git worktree add <path> -b <branch>` from the main checkout (`git rev-parse --path-format=absolute --git-common-dir`, minus `/.git`). The second press fails both `-b` and the plain add, so the "already there" case is `test -e <path>/.git`, not the git exit code.
@@ -78,6 +80,7 @@ A side panel beside Files and Changes that lists the issues and pull requests of
 - A row shows the item in the panel at once, with the list behind it on List; a `#number` link in the body opens that one with Back.
 - The Issues | PRs switch lists pull requests, merged ones as Merged; `!14` rows are Gitee's, `#7` GitHub's.
 - Read an issue, press Start work: `~/.herdr/worktrees/discount-calculation/issue-IKS3Q5-enhancement` exists, `git worktree list` shows it, a space opens there with the agent's first message holding the title, the body and its quotes/backticks/$HOME untouched.
+- Press +: the list gives way to a Title field, a body field and Create issue, dim until the title has something in it; Cancel comes back. Create makes a real issue on the platform that is listed afterwards and opens in the panel.
 - Press it a second time: the same space comes forward, no second checkout, no error line under the title.
 - Narrow the panel to 300px: the title still wraps with its number on a line of its own, the top bar keeps only List and its icons, and Close and Comment both fit.
 - A comment, a label change, close and reopen show on github.com and in the panel's list.

@@ -47,6 +47,14 @@ export const github = {
       : issue(await json(["issue", "view", String(number), "-R", repo, "--json", DETAIL], on));
   },
 
+  // A new issue: gh prints its URL, so the number is the last thing on it.
+  async create({ repo, title, body, on }) {
+    const url = await gh(["issue", "create", "-R", repo, "--title", title, "--body", body], on);
+    const number = /\/issues\/(\d+)\s*$/.exec(url.trim())?.[1];
+    if (!number) return null;
+    return issue(await json(["issue", "view", number, "-R", repo, "--json", DETAIL], on));
+  },
+
   // GitHub's REST timeline, as its own event objects. A pull request has one too.
   async timeline({ repo, number, on }) {
     const pages = await json(["api", "--paginate", "--slurp", `repos/${repo}/issues/${number}/timeline?per_page=100`], on).catch(() => null);
