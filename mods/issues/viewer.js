@@ -14,6 +14,8 @@ const EMOJI = {
   THUMBS_UP: "👍", THUMBS_DOWN: "👎", LAUGH: "😄", HOORAY: "🎉", CONFUSED: "😕", HEART: "❤️", ROCKET: "🚀", EYES: "👀",
 };
 const ROLES = { OWNER: "Owner", MEMBER: "Member", COLLABORATOR: "Collaborator", CONTRIBUTOR: "Contributor" };
+// A title with these has no spaces to wrap at: it wraps as text, not word by word.
+const CJK = /[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]/;
 
 // As GitHub says it: "3h ago" this month, "on Sep 21" before that.
 export function ago(iso) {
@@ -338,6 +340,7 @@ export class Viewer {
 
   composer(i, t, cx) {
     const open = i.state === "OPEN", busy = Boolean(this.busy), text = Boolean(this.replying);
+    const tight = (this.width ?? 600) < 430;
     // Gitee's API can't set its rejected state, and a pull request has no reason.
     const reasons = this.kind === "issue" && this.api.name !== "gitee";
     const tab = (id, label) => div().id(`item-tab-${id}`).h(32).px(14).flex().items_center().rounded_t(6).text_size(13).cursor_pointer()
@@ -354,13 +357,14 @@ export class Viewer {
           : div().px(16).py(14).min_h(110).bg(t.background).text_size(14).child(text
             ? TextView.markdown("item-preview", linkify(this.reply.value(), this.repo, this.api)).on_link_click((url, cx) => this.link(url, cx))
             : div().text_color(t.muted).child("Nothing to preview")))
-        .child(h_flex().px(12).py(10).gap(8).items_center().bg(t.background).border_t(1).border_color(t.border)
-          .child(div().flex_1().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments"))
+        .child(h_flex().px(tight ? 8 : 12).py(10).gap(8).items_center().flex_wrap().justify_end().bg(t.background).border_t(1).border_color(t.border)
+          .when(!tight, (e) => e.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments")))
+          .child(div().flex_1().when(!tight, (e) => e.w(0)))
           .child(open
-            ? h_flex().gap(0)
-              .child(this.button("item-close-done", text ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
+            ? h_flex().gap(0).flex_none()
+              .child(this.button("item-close-done", text && !tight ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
               .when(reasons, (e) => e.child(this.button("item-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
-            : this.button("item-reopen", text ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
+            : this.button("item-reopen", text && !tight ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
           .child(this.button("item-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
         .when(open && Boolean(this.closeMenu) && reasons, (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
           .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
@@ -431,7 +435,7 @@ export class Viewer {
     const pad = narrow ? 14 : 32;
     const bar = h_flex().h(32).gap(8).items_center()
       .child(this.button("item-back", this.history.length > 0 ? "Back" : "List", t, (_e, cx) => this.back(cx), { glyph: "back" }))
-      .child(div().text_size(13).text_color(t.muted).truncate().child(this.kind === "pull" ? `${this.repo} · pull request` : this.repo))
+      .when((this.width ?? 600) >= 430, (e) => e.child(div().text_size(13).text_color(t.muted).truncate().child(this.kind === "pull" ? `${this.repo} · pull request` : this.repo)))
       .child(div().flex_1().min_w(0).text_size(12).text_color(t.ansi1).truncate().child(i && this.error ? this.error : ""))
       .when(this.loading || Boolean(this.busy), (e) => e.child(h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
         .child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(this.busy ?? "Loading")))
@@ -450,9 +454,14 @@ export class Viewer {
       .on_size_change((size, cx) => { if (Math.abs((this.width ?? 0) - size.width) > 1) { this.width = size.width; cx.notify(); } })
       .child(v_flex().flex_none().px(pad).pt(12).pb(14).gap(10).border_b(1).border_color(t.border)
         .child(bar)
-        // Word by word, so the title wraps like text with the reference after its last word.
-        .child(h_flex().flex_wrap().gap_x(8).text_size(narrow ? 20 : 28).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
-          .child(div().text_color(t.muted).child(ref)))
+        // Word by word, so the title wraps like text with the reference after its last
+        // word. Chinese has no spaces to wrap at, so its title is one wrapping block
+        // with the reference under it.
+        .when(CJK.test(i.title), (e) => e.child(v_flex().gap(2)
+          .child(div().text_size(narrow ? 20 : 26).child(i.title))
+          .child(div().text_color(t.muted).child(ref))))
+        .when(!CJK.test(i.title), (e) => e.child(h_flex().flex_wrap().gap_x(8).text_size(narrow ? 20 : 28).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
+          .child(div().text_color(t.muted).child(ref))))
         .child(h_flex().gap(8).items_center().flex_wrap()
           .child(h_flex().h(narrow ? 26 : 32).px(narrow ? 9 : 12).gap(6).items_center().rounded(narrow ? 13 : 16).bg(color).text_color("#ffffff").text_size(narrow ? 12 : 14).font_semibold()
             .child(this.glyph(glyph, narrow ? 13 : 16, "#ffffff")).child(state))

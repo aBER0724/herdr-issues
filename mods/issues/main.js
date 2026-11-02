@@ -366,7 +366,8 @@ export default class Issues extends View {
     const empty = this.error && this.provider === "gitee" && !this.me
       ? `${this.error} · Put a Gitee token in ${providerOf("gitee").tokenPath()} to write and stop the 60-an-hour anonymous limit`
       : this.error || notFound;
-    const panel = v_flex().id("issues").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13);
+    const panel = v_flex().id("issues").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .on_size_change((size, cx) => { if (Math.abs((this.w ?? 0) - size.width) > 1) { this.w = size.width; cx.notify(); } });
     // Nothing to show until a terminal in a repository has had focus once.
     if (!this.repo) return panel.child(v_flex().flex_1().items_center().justify_center().gap(10).px(36)
       .child(div().size(28).when(this.icons, (e) => e.child(svg(icon("issue")).size(28).text_color(t.dim))))
@@ -377,13 +378,14 @@ export default class Issues extends View {
         .child(div().size(14).flex_none().when(this.icons, (e) => e.child(svg(icon("issue")).size(14).text_color(t.ansi2))))
         .child(div().font_semibold().child("Issues"))
         .when(this.provider === "gitee", (e) => e.child(div().h(18).px(6).flex_none().flex().items_center().rounded(5).border_1().border_color(t.border).text_size(10).text_color(t.muted).child("Gitee")))
-        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).text_right().truncate().child(this.repo ?? ""))
+        .when((this.w ?? 999) > 340, (e) => e.child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).text_right().truncate().child(this.repo ?? "")))
+        .when((this.w ?? 999) <= 340, (e) => e.child(div().flex_1()))
         .child(h_flex().id("issues-refresh").h(26).px(8).gap(5).flex_none().items_center().rounded(7).border_1().border_color(t.border).text_size(12).text_color(t.muted)
           .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.refresh(cx); cx.notify(); })
           .child(this.syncing
             ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)
             : div().size(12).when(this.icons, (e) => e.child(svg(icon("refresh")).size(12))))
-          .child(this.syncing ? "Syncing" : "Refresh")))
+          .when((this.w ?? 999) > 340, (e) => e.child(this.syncing ? "Syncing" : "Refresh"))))
       .child(v_flex().flex_none().p(8).gap(6).border_b(1).border_color(t.border)
         .child(h_flex().gap(6).items_center()
           .child(div().id("issues-filter").flex_1().min_w(0).h(28).px(9).flex().items_center().rounded(7).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
