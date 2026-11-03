@@ -154,6 +154,13 @@ export const gitee = {
     const [owner, name] = repo.split("/");
     return issue(await request(`/repos/${owner}/issues`, { method: "POST", body: { repo: name, title, body } }), repo);
   },
+  // Its title and body: an issue's go through the owner path its state does, a
+  // pull request's are updated where it is read.
+  async edit({ kind, repo, number, title, body }) {
+    const fields = { title, body };
+    if (kind === "pull") await updatePull(repo, number, fields);
+    else await update(repo, number, fields);
+  },
 
   // Gitee has no timeline endpoint: its comments are it. A pull request's list
   // also holds the code review comments, which have a file path and no place

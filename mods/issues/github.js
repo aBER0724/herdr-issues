@@ -56,6 +56,11 @@ export const github = {
     if (!number) return null;
     return issue(await json(["issue", "view", number, "-R", repo, "--json", DETAIL], on));
   },
+  // Its title and body, through the REST endpoint an issue and a pull request
+  // both answer to. A changed title comes back as a "renamed" event, as on the web.
+  async edit({ repo, number, title, body, on }) {
+    await gh(["api", "--method", "PATCH", `repos/${repo}/issues/${number}`, "-f", `title=${title}`, "-f", `body=${body}`], on);
+  },
 
   // GitHub's REST timeline, as its own event objects. A pull request has one too.
   async timeline({ repo, number, on }) {

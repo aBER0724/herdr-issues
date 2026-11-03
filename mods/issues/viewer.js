@@ -1,6 +1,6 @@
 import { div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
-import { exec, theme, openOverlay, setShared } from "herdr";
+import { v_flex, h_flex, TextView, TextareaState, Textarea, Input, InputState, Editor, EditorState } from "gpui-base";
+import { exec, run, home, knownAgents, spaces, shared, theme, settings, openOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
 import { blocks, picture, failed, loadPicture } from "./pictures.js";
 import { providerOf, providerAt } from "./api.js";
@@ -131,6 +131,13 @@ export class Viewer {
     this.reply.set_auto_grow(3, 12);
     this.reply.on("change", (_e, cx) => { const has = Boolean(this.reply.value().trim()); if (has !== this.replying) { this.replying = has; cx.notify(); } });
     this.reply.on("submit", (e, cx) => { if (e.secondary) this.comment(cx); });
+    // Its author may change the title and the body: an editor for the body, as
+    // the new issue's form has one, and a field for the title above it.
+    this.titleDraft = InputState.new({ placeholder: "Title" });
+    this.titleDraft.on("change", (_e, cx) => cx.notify());
+    this.bodyDraft = EditorState.new({ language: "markdown", value: "", font_family: settings().font_family, font_size: 13, line_numbers: false, soft_wrap: true });
+    this.bodyDraft.on("submit", (e, cx) => { if (e.secondary) this.saveEdit(cx); });
+    this.editingBody = false;
     cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
     this.load(cx);
   }
@@ -165,14 +172,14 @@ export class Viewer {
   go(repo, kind, number, cx) {
     if (repo === this.repo && kind === this.kind && number === this.number) return;
     this.history.push({ repo: this.repo, kind: this.kind, number: this.number });
-    this.repo = repo; this.kind = kind; this.number = number; this.editing = false; this.closeMenu = false;
+    this.repo = repo; this.kind = kind; this.number = number; this.editing = false; this.editingBody = false; this.closeMenu = false;
     this.load(cx); cx.notify();
   }
 
   back(cx) {
     const prev = this.history.pop();
     if (!prev) { this.onBack(cx); return; }
-    this.repo = prev.repo; this.kind = prev.kind; this.number = prev.number; this.editing = false; this.closeMenu = false;
+    this.repo = prev.repo; this.kind = prev.kind; this.number = prev.number; this.editing = false; this.editingBody = false; this.closeMenu = false;
     this.load(cx); cx.notify();
   }
 
@@ -234,6 +241,36 @@ export class Viewer {
     cx.notify();
   }
 
+  // The title and the body are their author's to change; that, and who you are,
+  // is all the panel knows — a repository's permissions are never fetched.
+  canEdit() {
+    return Boolean(this.issue) && Boolean(this.me) && login(this.issue.author) === this.me;
+  }
+
+  // In place: the title becomes a field and the body the editor, where the
+  // markdown was, until Save or Cancel.
+  beginEdit(cx) {
+    const i = this.issue;
+    if (!i || this.busy) return;
+    this.titleDraft.set_value(i.title ?? "");
+    this.bodyDraft.set_value(i.body ?? "");
+    this.editingBody = true; this.error = null;
+    cx.notify();
+  }
+
+  endEdit(cx) {
+    this.editingBody = false; this.error = null;
+    cx.notify();
+  }
+
+  saveEdit(cx) {
+    const title = this.titleDraft.value().trim();
+    if (!title || this.busy || !this.editingBody) return;
+    const body = this.bodyDraft.value();
+    this.change("Saving", () => this.api.edit({ kind: this.kind, repo: this.repo, number: this.number, title, body, on: this.on }), cx,
+      () => { this.editingBody = false; });
+  }
+
   // ---- drawing ----
 
   pic(name, url, size, t, cx) {
@@ -274,13 +311,31 @@ export class Viewer {
         .child(div().text_color(t.muted).child(c.first ? `opened ${ago(c.at)}` : ago(c.at)))
         .child(div().flex_1())
         .when(!c.first && c.login === author, (e) => e.child(this.badge("Author", t)))
-        .when(!c.first && Boolean(ROLES[c.role]), (e) => e.child(this.badge(ROLES[c.role], t))))
-      .child(div().px(16).py(14).text_size(14).child(c.body?.trim()
-        ? this.markdown(key, c.body, t, cx)
-        : div().text_color(t.muted).italic().child("No description provided.")))
+        .when(!c.first && Boolean(ROLES[c.role]), (e) => e.child(this.badge(ROLES[c.role], t)))
+        .when(c.first && !this.editingBody && this.canEdit(), (e) => e.child(div().id("item-edit").text_size(12).text_color(GITHUB.link).cursor_pointer()
+          .hover((s) => s.underline()).on_click((_e, cx) => this.beginEdit(cx)).child("Edit"))))
+      .child(div().px(16).py(14).text_size(14).child(c.first && this.editingBody
+        ? this.editForm(t, cx)
+        : c.body?.trim()
+          ? this.markdown(key, c.body, t, cx)
+          : div().text_color(t.muted).italic().child("No description provided.")))
       .when(c.reactions?.length > 0, (e) => e.child(h_flex().px(16).pb(14).gap(6).flex_wrap()
         .children(c.reactions.map((r) => h_flex().h(26).px(8).gap(5).items_center().rounded(13).border_1().border_color(t.border).bg(t.raised)
           .text_size(12).text_color(t.muted).child(div().text_size(14).child(r.emoji)).child(String(r.count))))));
+  }
+
+  // The body while it is being changed: the editor, then Save and Cancel. The
+  // editor wants a height of its own, so it takes what the panel leaves it.
+  editForm(t, cx) {
+    const ready = Boolean(this.titleDraft.value().trim()) && !this.busy;
+    const room = Math.max(160, Math.min(420, (this.height ?? 620) - 320));
+    return v_flex().flex_none().gap(10)
+      .child(v_flex().flex_none().h(room).rounded(6).border_1().border_color(t.border).overflow_hidden()
+        .child(Editor.new(this.bodyDraft).flex_1().min_h(0)))
+      .child(h_flex().gap(8).items_center().flex_wrap().justify_end()
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(ready || this.busy ? "" : "A title is needed"))
+        .child(this.button("item-edit-cancel", "Cancel", t, (_e, cx) => this.endEdit(cx), { enabled: !this.busy }))
+        .child(this.button("item-edit-save", "Save", t, (_e, cx) => this.saveEdit(cx), { primary: true, enabled: ready })));
   }
 
   // Markdown with its images drawn in between the text.
@@ -472,17 +527,24 @@ export class Viewer {
     const [state, color, glyph] = i.state === "OPEN" ? [i.stateText ?? "Open", i.stateColor ?? GITHUB.open, "issue"] : i.state === "MERGED" ? ["Merged", i.stateColor ?? GITHUB.done, "pull"]
       : i.stateReason === "NOT_PLANNED" ? [i.stateText ?? "Closed", i.stateColor ?? GITHUB.skipped, "skipped"] : [i.stateText ?? "Closed", i.stateColor ?? GITHUB.done, "done"];
     return v_flex().id("item").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(14)
-      .on_size_change((size, cx) => { if (Math.abs((this.width ?? 0) - size.width) > 1) { this.width = size.width; cx.notify(); } })
+      .on_size_change((size, cx) => { if (Math.abs((this.width ?? 0) - size.width) > 1 || Math.abs((this.height ?? 0) - size.height) > 1) { this.width = size.width; this.height = size.height; cx.notify(); } })
       .child(v_flex().flex_none().px(pad).pt(12).pb(14).gap(10).border_b(1).border_color(t.border)
         .child(bar)
         // Word by word, so the title wraps like text with the reference after its last
         // word. Chinese has no spaces to wrap at, so its title is one wrapping block
         // with the reference under it.
-        .when(CJK.test(i.title), (e) => e.child(v_flex().gap(2)
-          .child(div().text_size(narrow ? 20 : 26).child(i.title))
-          .child(div().text_color(t.muted).child(ref))))
-        .when(!CJK.test(i.title), (e) => e.child(h_flex().flex_wrap().gap_x(8).text_size(narrow ? 20 : 28).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
-          .child(div().text_color(t.muted).child(ref))))
+        .child(this.editingBody
+          ? h_flex().id("item-title-edit").gap(10).items_center()
+            .child(div().flex_1().min_w(0).h(narrow ? 32 : 40).px(9).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .child(Input.new(this.titleDraft).h_full().text_size(narrow ? 16 : 20).text_color(t.foreground)))
+            .child(div().text_size(13).text_color(t.muted).child(ref))
+          : CJK.test(i.title)
+            ? v_flex().gap(2)
+              .child(div().text_size(narrow ? 20 : 26).child(i.title))
+              .child(div().text_color(t.muted).child(ref))
+            : h_flex().flex_wrap().gap_x(8).text_size(narrow ? 20 : 28).children(i.title.split(/\s+/).filter(Boolean).map((w) => div().child(w)))
+              .child(div().text_color(t.muted).child(ref)))
         .child(h_flex().gap(8).items_center().flex_wrap()
           .child(h_flex().h(narrow ? 26 : 32).px(narrow ? 9 : 12).gap(6).items_center().rounded(narrow ? 13 : 16).bg(color).text_color("#ffffff").text_size(narrow ? 12 : 14).font_semibold()
             .child(this.glyph(glyph, narrow ? 13 : 16, "#ffffff")).child(state))
