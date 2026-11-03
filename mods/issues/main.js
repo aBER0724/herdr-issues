@@ -3,6 +3,7 @@ import { v_flex, h_flex, InputState, Input, Editor, EditorState } from "gpui-bas
 import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, notify, props, appHome, shared, setShared, settings } from "herdr";
 import * as fs from "fs/promises";
 import { Viewer, copyMenu } from "./viewer.js";
+import { Starter } from "./start.js";
 import { icons, icon } from "./icons.js";
 import { providerOf, remoteRepo, ORDER } from "./api.js";
 
@@ -101,9 +102,11 @@ function within(work, ms, cx, what) {
 // menu and the copy menu, as overlays of the panel.
 export default class Issues extends View {
   init(_props, cx) {
-    const { overlay, sortMenu, copyMenu: copying, button } = props() ?? {};
+    const { overlay, sortMenu, copyMenu: copying, button, start } = props() ?? {};
     if (sortMenu) { this.menu = overlay; return; }
     if (copying) { this.copying = { ...copying, overlay }; return; }
+    // Start work: a dialog of its own over the panel, one worktree and agent away.
+    if (start) { this.starting = new Starter({ ...start, overlay }, cx); return; }
     if (button) {
       // The tab bar restores each space's panel only if it's one of these.
       const panels = shared("workspace.panels") ?? ["files", "changes"];
@@ -415,6 +418,7 @@ export default class Issues extends View {
     const t = theme();
     if (this.menu) return this.sortMenu(t);
     if (this.copying) return this.copyMenu(t);
+    if (this.starting) return this.starting.render(cx);
     if (this.button) return this.toolbar(t);
     if (this.detailView) return this.detailView.render(cx);
     const away = hidden();

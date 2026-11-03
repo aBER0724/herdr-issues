@@ -111,6 +111,8 @@ function pull(p, repo) {
     comments: [], commentCount: null,
     milestone: p.milestone ? { title: p.milestone.title } : null,
     closedByPullRequestsReferences: [],
+    // The branches Start work's brief sends the agent to.
+    head: p.head?.ref ?? null, base: p.base?.ref ?? null,
     url: p.html_url ?? `https://gitee.com/${repo}/pulls/${p.number}`,
   };
 }

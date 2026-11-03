@@ -1,6 +1,6 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
-import { exec, run, home, knownAgents, spaces, shared, theme, openOverlay, setShared } from "herdr";
+import { exec, theme, openOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
 import { blocks, picture, failed, loadPicture } from "./pictures.js";
 import { providerOf, providerAt } from "./api.js";
@@ -106,31 +106,16 @@ export function labelChip(l, t) {
     .text_size(12).font_semibold().text_color(light ? `#${l.color}` : t.foreground).child(l.name);
 }
 
-// A worktree where the worktree mod puts them: <home>/.herdr/worktrees/<repo>/<branch>,
-// slashes in the branch written as dashes.
-const worktreePath = (main, branch) => `${home()}/.herdr/worktrees/${main.split("/").filter(Boolean).pop()}/${branch.replace(/\//g, "-")}`;
-// issue/IKS3Q5-fix-the-export, or just issue/IKS3Q5 when the title is all Chinese
-// and leaves no words to slug.
-const branchFor = (i) => {
-  const slug = (i.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
-  return slug ? `issue/${i.number}-${slug}` : `issue/${i.number}`;
+// Start work: the dialog picks the harness, its model, the branch and the brief; it makes
+// the worktree and the space. The creator is this mod itself, as an overlay.
+const startProps = (viewer) => {
+  const i = viewer.issue, api = viewer.api;
+  return {
+    repo: viewer.repo, provider: api.name, kind: viewer.kind, number: i.number,
+    ref: i.ref ?? `#${i.number}`, title: i.title, url: i.url, body: i.body ?? "",
+    head: i.head ?? null, base: i.base ?? null, folder: viewer.folder, on: viewer.on,
+  };
 };
-const firstLine = (s) => (s ?? "").split("\n").map((l) => l.trim()).filter(Boolean)[0] ?? "";
-// What the agent is told: the item, what it says, and the steps between reading and
-// committing. Long bodies are cut: the link is right there for the rest.
-function taskFor(i, provider) {
-  const body = (i.body ?? "").trim();
-  return [
-    `处理这个 ${provider} issue，改动就在这个 worktree 里。`,
-    "",
-    `${i.ref ?? `#${i.number}`} ${i.title}`,
-    i.url ?? "",
-    "",
-    body.length > 3000 ? `${body.slice(0, 3000)}\n…（正文过长，已截断；完整内容见上面的链接）` : body || "（没有正文）",
-    "",
-    "步骤：先读 issue 和链接里的讨论，复现或确认问题，做最小的改动，跑仓库现有的检查（测试/lint/build），在当前分支提交，最后说明改了什么、哪些没有验证到。",
-  ].join("\n");
-}
 
 // One issue or pull request where the panel's list was: { repo, provider, kind,
 // number, data?, me? } from the panel, with Back to the list. Links to other
@@ -138,7 +123,7 @@ function taskFor(i, provider) {
 export class Viewer {
   constructor({ repo, kind, provider, number, on, data, me, folder }, cx, { onBack }) {
     this.repo = repo; this.number = number; this.kind = kind ?? "issue"; this.on = on; this.me = me;
-    this.folder = folder; this.starting = false; this.startError = null;
+    this.folder = folder;
     this.api = providerOf(provider); this.onBack = onBack;
     this.history = []; this.cache = {}; this.timelines = {}; this.labels = {}; this.tab = "write";
     if (data) this.cache[`${this.kind}:${repo}#${number}`] = data;
@@ -150,43 +135,11 @@ export class Viewer {
     this.load(cx);
   }
 
-  // Start work: a worktree on a branch named after the item, then a space in it with an
-  // agent and this item as its first message. The worktree mod's paths, so both lists
-  // agree on where a checkout lives; a space already on that checkout is opened instead.
-  async startWork(cx) {
-    const i = this.issue;
-    if (!i || this.starting) return;
-    this.starting = true; this.startError = null; cx.notify();
-    try {
-      const at = this.folder;
-      if (!at) throw new Error("No folder: open a terminal in the repository first.");
-      const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: at, on: this.on });
-      if (common.code !== 0) throw new Error(firstLine(common.stderr) || "Not a git checkout.");
-      const main = common.stdout.trim().replace(/\/\.git$/, "");
-      const branch = branchFor(i), path = worktreePath(main, branch);
-      const open = spaces().find((s) => s.folder === path);
-      if (open) { run("space.select", { id: open.id }); this.starting = false; return; }
-      const added = await exec("git", ["worktree", "add", path, "-b", branch], { cwd: main, on: this.on });
-      if (added.code !== 0) {
-        // The branch is already there: check it out rather than refuse. A folder with
-        // no .git in it is not a worktree, and that failure is worth showing.
-        const kept = await exec("git", ["worktree", "add", path, branch], { cwd: main, on: this.on });
-        const there = await exec("test", ["-e", `${path}/.git`], { on: this.on });
-        if (kept.code !== 0 && there.code !== 0) throw new Error(firstLine(kept.stderr) || firstLine(added.stderr) || "git worktree add failed.");
-      }
-      const agents = (await knownAgents({ on: this.on })).filter((a) => a.agent && a.installed);
-      const wanted = shared("issues.agent");
-      const agent = agents.find((a) => a.key === wanted) ?? agents[0];
-      if (!agent) throw new Error("No agent installed to start.");
-      const repo = main.split("/").filter(Boolean).pop();
-      run("space.new", {
-        name: `${repo} ${i.ref ?? `#${i.number}`}`, folder: path, tab: agent.name,
-        argv: agent.run, task: taskFor(i, this.api.name), ...(this.on ? { machine: this.on } : {}),
-      });
-    } catch (e) {
-      this.startError = String(e?.message ?? e);
-    }
-    this.starting = false; cx.notify();
+  // Start work: the dialog does the worktree, the branch, the harness and the brief. A
+  // space already showing that worktree is opened instead, without asking.
+  startWork() {
+    if (!this.issue) return;
+    openOverlay({ mod: "issues", kind: "dialog", width: 660, height: 720, props: { start: startProps(this) } });
   }
 
   id() { return `${this.kind}:${this.repo}#${this.number}`; }
@@ -501,8 +454,8 @@ export class Viewer {
     const pad = narrow ? 14 : 32;
     const bar = h_flex().h(32).gap(8).items_center()
       .child(this.button("item-back", this.history.length > 0 ? "Back" : "List", t, (_e, cx) => this.back(cx), { glyph: "back" }))
-      .when(Boolean(i) && !this.loading, (e) => e.child(this.button("item-work", (this.width ?? 600) >= 430 ? (this.starting ? "Starting…" : "Start work") : "", t,
-        (_e, cx) => this.startWork(cx), { glyph: "work", primary: true, enabled: !this.starting })))
+      .when(Boolean(i) && !this.loading, (e) => e.child(this.button("item-work", (this.width ?? 600) >= 430 ? "Start work" : "", t,
+        (_e, cx) => this.startWork(), { glyph: "work", primary: true })))
       .when((this.width ?? 600) >= 430, (e) => e.child(div().text_size(13).text_color(t.muted).truncate().child(this.kind === "pull" ? `${this.repo} · pull request` : this.repo)))
       .child(div().flex_1().min_w(0).text_size(12).text_color(t.ansi1).truncate().child(i && this.error ? this.error : ""))
       .when(this.loading || Boolean(this.busy), (e) => e.child(h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
@@ -522,8 +475,6 @@ export class Viewer {
       .on_size_change((size, cx) => { if (Math.abs((this.width ?? 0) - size.width) > 1) { this.width = size.width; cx.notify(); } })
       .child(v_flex().flex_none().px(pad).pt(12).pb(14).gap(10).border_b(1).border_color(t.border)
         .child(bar)
-        .when(Boolean(this.startError), (e) => e.child(h_flex().gap(6).items_start().text_size(12).text_color(t.ansi1)
-          .child(this.glyph("work", 12, t.ansi1)).child(div().flex_1().min_w(0).child(this.startError))))
         // Word by word, so the title wraps like text with the reference after its last
         // word. Chinese has no spaces to wrap at, so its title is one wrapping block
         // with the reference under it.

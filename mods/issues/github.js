@@ -5,7 +5,7 @@ export const FIELDS = "number,title,body,author,state,stateReason,labels,assigne
 export const DETAIL = `${FIELDS},milestone,closedByPullRequestsReferences,reactionGroups`;
 // A pull request has no stateReason, and has a merged state of its own, a draft
 // flag and the issues it closes.
-const PULL = "number,title,body,author,state,labels,assignees,createdAt,updatedAt,comments,url,milestone,reactionGroups,isDraft,mergedAt";
+const PULL = "number,title,body,author,state,labels,assignees,createdAt,updatedAt,comments,url,milestone,reactionGroups,isDraft,mergedAt,headRefName,baseRefName";
 const PULL_DETAIL = `${PULL},closingIssuesReferences`;
 
 async function gh(args, on) {
@@ -21,6 +21,8 @@ const issue = (i) => ({ ...i, order: i.number, ref: `#${i.number}`, commentCount
 const pull = (i) => ({
   ...i, order: i.number, ref: `#${i.number}`, commentCount: i.comments.length,
   stateText: i.isDraft && i.state === "OPEN" ? "Draft" : null,
+  // The branches Start work's brief sends the agent to.
+  head: i.headRefName ?? null, base: i.baseRefName ?? null,
 });
 
 export const github = {
