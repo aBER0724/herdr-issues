@@ -5,7 +5,7 @@ import * as fs from "fs/promises";
 import { Viewer, copyMenu } from "./viewer.js";
 import { Starter } from "./start.js";
 import { icons, icon } from "./icons.js";
-import { providerOf, remoteRepo, ORDER } from "./api.js";
+import { providerOf, providerAt, remoteNamed, remoteRepo, ORDER } from "./api.js";
 
 // Where the focused pane is, as the Changes panel finds it. A focused mod pane
 // (this one, as a split) has no folder of its own: it keeps the last one.
@@ -14,7 +14,21 @@ function location(last) {
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   if (pane && !pane.terminal && last) return last;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  // A focused mod pane (this one) has no folder of its own: the terminals in its
+  // tab, then any in its space, say where the space is. A space on another
+  // machine has no folder either, so without this it finds no repository at all.
+  const tabs = new Set(space?.tabs?.map((tab) => tab.id) ?? []), held = panes().filter((p) => p.cwd);
+  const cwd = pane?.cwd || f?.cwd || space?.folder
+    || held.find((p) => p.tab === f?.tab)?.cwd
+    || held.find((p) => tabs.has(p.tab))?.cwd;
+  return { cwd, on };
+}
+// Where an ssh alias really points: `ssh -G` prints the config ssh would use,
+// and its `hostname` is the machine (git@github-work:o/r is github.com). Read on
+// the folder's own machine, whose ssh config is the one that alias lives in.
+async function sshHost(name, on) {
+  const r = await exec("ssh", ["-G", name], { on }).catch(() => null);
+  return (r?.code === 0 && /^hostname\s+(\S+)/im.exec(r.stdout)?.[1].toLowerCase()) || null;
 }
 
 const FULL = 300;                 // open issues (or pull requests) fetched when a repo has no cache yet
@@ -169,7 +183,20 @@ export default class Issues extends View {
     if (this.checked[id]) return this.repos[id] ?? null;
     this.checked[id] = true;
     const r = await exec("git", ["remote", "-v"], { cwd, on });
-    const remotes = r.code === 0 ? r.stdout.split("\n").map((line) => remoteRepo(line.split(/\s+/)[1] ?? "")).filter(Boolean) : [];
+    const remotes = [], seen = new Set();
+    for (const line of r.code === 0 ? r.stdout.split("\n") : []) {
+      const url = line.split(/\s+/)[1] ?? "";
+      const known = remoteRepo(url);
+      if (known) { remotes.push(known); continue; }
+      // An ssh alias names no platform of its own: git@github-work:o/r is
+      // GitHub's once ssh says where `github-work` goes. Once per host, because
+      // `git remote -v` names each remote twice.
+      const alias = remoteNamed(url);
+      if (!alias || seen.has(alias.host)) continue;
+      seen.add(alias.host);
+      const provider = providerAt(await sshHost(alias.host, on));
+      if (provider) remotes.push({ provider, repo: alias.repo });
+    }
     const found = ORDER.map((provider) => remotes.find((m) => m.provider === provider)).find(Boolean);
     if (found) this.repos[id] = found;
     else if (r.code === 0) delete this.repos[id];
@@ -184,6 +211,24 @@ export default class Issues extends View {
       if (me) { this.logins[id] = me; localStorage.setItem("logins", JSON.stringify(this.logins)); }
     }
     return this.logins[id];
+  }
+
+  // The machine the reads run on for this repository: the folder's own, or this
+  // computer (`null`) when that machine has no gh to read with.
+  async readOn(repo, provider, on) {
+    if (provider !== "github" || !on) return on;
+    this.reads ??= {};
+    const id = JSON.stringify([repo, on]);
+    if (!(id in this.reads)) this.reads[id] = (await this.gh(on)) ? on : null;
+    return this.reads[id];
+  }
+
+  // Whether that machine has `gh`: one answer per machine, and a person pressing
+  // Refresh asks again.
+  async gh(on) {
+    this.tools ??= {};
+    if (!(on in this.tools)) this.tools[on] = (await exec("gh", ["--version"], { on }).catch(() => null))?.code === 0;
+    return this.tools[on];
   }
 
   async store(repo, provider, kind) {
@@ -247,6 +292,7 @@ export default class Issues extends View {
     if (this.syncing && !force && now - this.began < STALE) { this.again = true; return; }
     const run = (this.run = (this.run ?? 0) + 1);
     this.syncing = true; this.began = now;
+    if (force) { this.tools = {}; this.reads = {}; }
     cx.spawn(async (cx) => {
       try {
         const found = cwd ? await this.repoFor(cwd, on) : null;
@@ -254,6 +300,9 @@ export default class Issues extends View {
         this.pick(found, space, on);
         const repo = this.repo, kind = this.kind;
         if (!repo) return;
+        // A remote space reads its repository with that machine's gh; a machine
+        // without one reads it with this computer's, which is the same account.
+        this.repoOn = await this.readOn(repo, this.provider, this.repoOn);
         const store = await this.store(repo, this.provider, kind);
         cx.notify();
         this.me = await within(this.login(this.provider, this.repoOn), SLOW, cx, "Signing in");

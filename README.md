@@ -6,7 +6,7 @@ A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. 
 
 ![Issues panel](preview.png)
 
-- **Follows your focus.** The panel shows the issues of the repository the focused terminal is in, GitHub's or Gitee's; a folder with both remotes shows GitHub's. Each space remembers its own repository, so a terminal outside any repository keeps showing that one.
+- **Follows your focus.** The panel shows the issues of the repository the focused terminal is in, GitHub's or Gitee's; a folder with both remotes shows GitHub's. Each space remembers its own repository, so a terminal outside any repository keeps showing that one. A remote named through an ssh alias (`git@github-work:owner/repo`) is followed to the machine ssh says it stands for.
 - **In this terminal.** Issue numbers (`#123`, or `#IKS135` on Gitee) and issue or pull request links on the focused terminal's screen are listed at the top, newest first, so an agent's "fixed #55" is one click away.
 - **Issues and pull requests.** A switch beside the filter shows either; merged pull requests read as merged, drafts as draft.
 - **Open and closed, sorted your way.** Filter on open or closed, all or assigned to you, or by text, and sort the way GitHub does: newest, oldest, recently updated, least recently updated, most commented.
@@ -19,7 +19,7 @@ A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. 
 
 ## Install
 
-For GitHub repositories you need the [GitHub CLI](https://cli.github.com) (`gh`), logged in with `gh auth login`. Gitee needs a personal access token instead, see [Gitee](#gitee).
+For GitHub repositories you need the [GitHub CLI](https://cli.github.com) (`gh`), logged in with `gh auth login`. Gitee needs a personal access token instead, see [Gitee](#gitee). A repository on another machine (a space on a remote machine) is read on that machine, with its own `gh`; a machine without one has this computer's `gh` read it instead.
 
 Clone this repository and link the mod into Herdr's home, so a `git pull` updates it:
 
