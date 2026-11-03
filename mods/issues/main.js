@@ -20,6 +20,8 @@ const FULL = 300;                 // open issues (or pull requests) fetched when
 const CLOSED = 100;               // and the most recently closed ones
 const SYNC = 30000;               // how often the changes since the last sync are fetched
 const RESYNC = 6 * 3600 * 1000;   // a full fetch now and then catches what search misses (deleted, transferred)
+const SLOW = 90000;               // a sync still unfinished this long sits on a socket that died
+const STALE = 150000;             // a sync this old never came back: the next tick starts another
 const MENTIONS = 8;
 const VERSION = 3;                // a cache from another version starts with a full fetch
 const KIND = { issue: "Issues", pull: "PRs" };
@@ -82,6 +84,16 @@ function upsert(store, items) {
 async function save(provider, repo, kind, store) {
   await fs.mkdir(folder(), { recursive: true });
   await fs.writeFile(file(provider, repo, kind), JSON.stringify(store));
+}
+
+// A wait that would outlive the panel: past `ms` the caller gets an error instead of hanging
+// on it for good. Neither arm rejects, so the one that loses the race is left unhandled.
+function within(work, ms, cx, what) {
+  const late = new Error(`${what} did not answer within ${Math.round(ms / 1000)}s`);
+  return Promise.race([
+    work.then((value) => ({ value }), (error) => ({ error })),
+    cx.sleep(ms).then(() => ({ error: late })),
+  ]).then((r) => { if (r.error) throw r.error; return r.value; });
 }
 
 // The panel; its Issues button beside the tab bar's Files and Changes (props
@@ -218,15 +230,20 @@ export default class Issues extends View {
     return null;
   }
 
-  refresh(cx) {
+  // `force` is a person asking again: a sync already running is left behind, not waited on.
+  refresh(cx, force) {
     const { cwd, on } = this.where(), context = this.context(), space = focused()?.space;
     if (context !== this.ctx) {
       // A folder seen before shows its repo's cached items at once.
       this.ctx = context; this.error = null;
       this.pick(cwd ? this.repos[JSON.stringify([cwd, on])] : null, space, on);
     }
-    if (this.syncing) { this.again = true; return; }
-    this.syncing = true;
+    // A socket that stops answering would hold `syncing` for good: past STALE the next tick
+    // starts another sync and forgets this one.
+    const now = Date.now();
+    if (this.syncing && !force && now - this.began < STALE) { this.again = true; return; }
+    const run = (this.run = (this.run ?? 0) + 1);
+    this.syncing = true; this.began = now;
     cx.spawn(async (cx) => {
       try {
         const found = cwd ? await this.repoFor(cwd, on) : null;
@@ -236,12 +253,14 @@ export default class Issues extends View {
         if (!repo) return;
         const store = await this.store(repo, this.provider, kind);
         cx.notify();
-        this.me = await this.login(this.provider, this.repoOn);
-        if (await this.pull(repo, this.provider, kind, store, this.repoOn)) cx.notify();
-        if (this.context() === context) this.error = null;
-      } catch (e) { if (this.context() === context) this.error = String(e?.message ?? e); }
+        this.me = await within(this.login(this.provider, this.repoOn), SLOW, cx, "Signing in");
+        if (await within(this.pull(repo, this.provider, kind, store, this.repoOn), SLOW, cx, "Syncing")) cx.notify();
+        if (this.run === run && this.context() === context) this.error = null;
+      } catch (e) { if (this.run === run && this.context() === context) this.error = String(e?.message ?? e); }
       finally {
-        this.syncing = false; cx.notify();
+        // Only the sync that owns the flag clears it: one that timed out must not unlock a
+        // newer sync's spinner.
+        if (this.run === run) { this.syncing = false; cx.notify(); }
         if (this.again) { this.again = false; this.refresh(cx); }
       }
     });
@@ -303,7 +322,7 @@ export default class Issues extends View {
     if (this.kind === kind) return;
     this.kind = kind; setShared("issues.kind", kind);
     this.showList(); this.mentioned = []; this.error = null;
-    this.refresh(cx); cx.notify();
+    this.refresh(cx, true); cx.notify();
   }
 
   shown() {
@@ -434,7 +453,7 @@ export default class Issues extends View {
         .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.composing = true; this.postError = null; this.ready = Boolean(this.draftTitle.value().trim()); cx.notify(); })
         .child(div().size(12).when(this.icons, (e) => e.child(svg(icon("plus")).size(12))))))
       .child(h_flex().id("issues-refresh").h(26).px(8).gap(5).flex_none().items_center().rounded(7).border_1().border_color(t.border).text_size(12).text_color(t.muted)
-        .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.refresh(cx); cx.notify(); })
+        .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.refresh(cx, true); cx.notify(); })
         .child(this.syncing
           ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)
           : div().size(12).when(this.icons, (e) => e.child(svg(icon("refresh")).size(12))))
