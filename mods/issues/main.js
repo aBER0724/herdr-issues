@@ -386,11 +386,28 @@ export default class Issues extends View {
 
   row(i, t, where = "item") {
     const closed = i.state && i.state !== "OPEN";
+    // The number's column is wide enough for its longest idents (Gitee's `#IKS135`
+    // and six-figure GitHub numbers), and the chip inside it hugs its own text: a
+    // highlight as wide as the column would sit behind air.
+    const number = i.ref ?? `#${i.number}`, column = number.length >= 6 ? 62 : 40;
+    // The number copies itself: a press that landed on it is the copy menu's
+    // "Copy number" without the menu, and the row stays shut. Where the press
+    // landed is kept here rather than read off the number's own element, since a
+    // click on a piece of a row reaches the row and nothing else.
     return h_flex().id(`${where}-${i.number}`).flex_none().px(10).py(6).gap(8).items_start().rounded(7).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(i, cx))
+      .hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (e) => { this.pressX = e.local_position?.x ?? null; })
+      .on_click((_e, cx) => { if (this.pressX !== null && this.pressX <= 10 + column) this.copied(number, cx); else this.open(i, cx); })
       .on_mouse_down("right", () => copyMenu({ repo: this.repo, provider: this.provider, kind: this.kind, number: i.number, ref: i.ref, title: i.title, url: i.url }, "pointer"))
-      .child(div().flex_none().w(i.ref && i.ref.length > 3 ? 62 : 40).text_color(closed ? t.ansi5 : t.dim).child(i.ref ?? `#${i.number}`))
+      .child(h_flex().flex_none().w(column).text_color(closed ? t.ansi5 : t.dim)
+        .child(div().id(`${where}-copy-${i.number}`).flex_none().rounded(4).px(4).ml(-4).tooltip(`Copy ${number}`)
+          .hover((s) => s.bg(t.selected).text_color(t.foreground)).child(number)))
       .child(div().flex_1().min_w(0).text_color(closed && where !== "item" ? t.muted : t.foreground).child(i.title));
+  }
+
+  copied(text, cx) {
+    cx.write_to_clipboard(text);
+    notify({ title: "Copied", body: text, level: "success", timeout: 2500 });
   }
 
   heading(label, t) {
@@ -417,7 +434,7 @@ export default class Issues extends View {
     const items = [["Copy link", url], ["Copy reference", ref], ["Copy number", number], ["Copy number and title", title]].filter(([, text]) => text);
     return v_flex().id("issues-copy").size_full().p(6).gap(1).bg(t.popover).text_color(t.foreground).text_size(12)
       .children(items.map(([label, text], n) => v_flex().id(`copy-${n}`).px(8).py(6).rounded(6).cursor_pointer().hover((e) => e.bg(t.hover))
-        .on_click((_e, cx) => { cx.write_to_clipboard(text); notify({ title: "Copied", body: text, level: "success", timeout: 2500 }); closeOverlay(overlay); })
+        .on_click((_e, cx) => { this.copied(text, cx); closeOverlay(overlay); })
         .child(div().font_semibold().child(label))
         .child(div().text_size(11).text_color(t.muted).truncate().child(text))));
   }
