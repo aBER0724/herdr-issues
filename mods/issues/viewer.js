@@ -1,8 +1,9 @@
 import { div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, TextareaState, Textarea, Input, InputState, Editor, EditorState } from "gpui-base";
-import { exec, run, home, knownAgents, spaces, shared, theme, settings, openOverlay, setShared } from "herdr";
+import { v_flex, h_flex, TextView, Input, InputState } from "gpui-base";
+import { exec, run, home, knownAgents, spaces, shared, theme, openOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
-import { blocks, picture, failed, loadPicture } from "./pictures.js";
+import { openUrl, markdownView } from "./markdown.js";
+import { MarkdownBox } from "./composer.js";
 import { providerOf, providerAt } from "./api.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -26,17 +27,6 @@ export function ago(iso) {
   if (s < 86400 * 30) return `${Math.round(s / 86400)}d ago`;
   const d = new Date(iso), year = d.getFullYear() === new Date().getFullYear() ? "" : `, ${d.getFullYear()}`;
   return `on ${MONTHS[d.getMonth()]} ${d.getDate()}${year}`;
-}
-
-export function openUrl(url) {
-  exec("sh", ["-c", 'xdg-open "$1" >/dev/null 2>&1 &', "sh", url]).catch(() => exec("open", [url]).catch(() => null));
-}
-
-// #123 (GitHub) or #IKS135 (Gitee), and owner/repo#123, outside code become links.
-function linkify(markdown, repo, api) {
-  const ref = api.name === "gitee" ? /(^|[\s(])(?:([\w.-]+\/[\w.-]+))?#([A-Za-z][A-Za-z0-9]{3,9})\b/g : /(^|[\s(])(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/g;
-  return markdown.split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part, n) => n % 2 ? part
-    : part.replace(ref, (_m, pre, other, number) => `${pre}[${other ?? ""}#${number}](${api.web}/${other ?? repo}/issues/${number})`)).join("");
 }
 
 // gh says app/name for apps, the REST API name[bot]; GitHub shows the name with a bot badge.
@@ -125,18 +115,20 @@ export class Viewer {
     this.repo = repo; this.number = number; this.kind = kind ?? "issue"; this.on = on; this.me = me;
     this.folder = folder;
     this.api = providerOf(provider); this.onBack = onBack;
-    this.history = []; this.cache = {}; this.timelines = {}; this.labels = {}; this.tab = "write";
+    this.history = []; this.cache = {}; this.timelines = {}; this.labels = {};
     if (data) this.cache[`${this.kind}:${repo}#${number}`] = data;
-    this.reply = TextareaState.new({ placeholder: "Leave a comment" });
-    this.reply.set_auto_grow(3, 12);
-    this.reply.on("change", (_e, cx) => { const has = Boolean(this.reply.value().trim()); if (has !== this.replying) { this.replying = has; cx.notify(); } });
-    this.reply.on("submit", (e, cx) => { if (e.secondary) this.comment(cx); });
-    // Its author may change the title and the body: an editor for the body, as
+    // The comment box: a markdown box whose text drives the Comment button.
+    this.replyBox = new MarkdownBox(cx, {
+      id: "item-reply", placeholder: "Leave a comment",
+      onChange: (cx) => { const has = Boolean(this.replyBox.value.trim()); if (has !== this.replying) { this.replying = has; cx.notify(); } },
+      onSubmit: (cx) => this.comment(cx),
+    });
+    this.reply = this.replyBox.state;
+    // Its author may change the title and the body: the same box for the body, as
     // the new issue's form has one, and a field for the title above it.
     this.titleDraft = InputState.new({ placeholder: "Title" });
     this.titleDraft.on("change", (_e, cx) => cx.notify());
-    this.bodyDraft = EditorState.new({ language: "markdown", value: "", font_family: settings().font_family, font_size: 13, line_numbers: false, soft_wrap: true });
-    this.bodyDraft.on("submit", (e, cx) => { if (e.secondary) this.saveEdit(cx); });
+    this.bodyBox = new MarkdownBox(cx, { id: "item-body-edit", placeholder: "Describe it", rows: [6, 60], onSubmit: (cx) => this.saveEdit(cx) });
     this.editingBody = false;
     cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
     this.load(cx);
@@ -210,7 +202,7 @@ export class Viewer {
     cx.notify();
   }
 
-  cleared() { this.reply.set_value(""); this.replying = false; this.tab = "write"; }
+  cleared() { this.replyBox.reset(); this.replying = false; }
 
   comment(cx) {
     const body = this.reply.value().trim();
@@ -253,7 +245,7 @@ export class Viewer {
     const i = this.issue;
     if (!i || this.busy) return;
     this.titleDraft.set_value(i.title ?? "");
-    this.bodyDraft.set_value(i.body ?? "");
+    this.bodyBox.setValue(i.body ?? "");
     this.editingBody = true; this.error = null;
     cx.notify();
   }
@@ -266,7 +258,7 @@ export class Viewer {
   saveEdit(cx) {
     const title = this.titleDraft.value().trim();
     if (!title || this.busy || !this.editingBody) return;
-    const body = this.bodyDraft.value();
+    const body = this.bodyBox.value;
     this.change("Saving", () => this.api.edit({ kind: this.kind, repo: this.repo, number: this.number, title, body, on: this.on }), cx,
       () => { this.editingBody = false; });
   }
@@ -328,33 +320,19 @@ export class Viewer {
   // editor wants a height of its own, so it takes what the panel leaves it.
   editForm(t, cx) {
     const ready = Boolean(this.titleDraft.value().trim()) && !this.busy;
-    const room = Math.max(160, Math.min(420, (this.height ?? 620) - 320));
-    return v_flex().flex_none().gap(10)
-      .child(v_flex().flex_none().h(room).rounded(6).border_1().border_color(t.border).overflow_hidden()
-        .child(Editor.new(this.bodyDraft).flex_1().min_h(0)))
-      .child(h_flex().gap(8).items_center().flex_wrap().justify_end()
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(ready || this.busy ? "" : "A title is needed"))
-        .child(this.button("item-edit-cancel", "Cancel", t, (_e, cx) => this.endEdit(cx), { enabled: !this.busy }))
-        .child(this.button("item-edit-save", "Save", t, (_e, cx) => this.saveEdit(cx), { primary: true, enabled: ready })));
+    const footer = h_flex().px(10).py(10).gap(8).items_center().flex_wrap().justify_end().border_t(1).border_color(t.border)
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(ready || this.busy ? "" : "A title is needed"))
+      .child(this.button("item-edit-cancel", "Cancel", t, (_e, cx) => this.endEdit(cx), { enabled: !this.busy }))
+      .child(this.button("item-edit-save", "Save", t, (_e, cx) => this.saveEdit(cx), { primary: true, enabled: ready }));
+    return this.bodyBox.render(cx, { t, md: this.previewer("item-edit-preview", t), room: this.columnRoom(), footer });
   }
 
-  // Markdown with its images drawn in between the text.
-  markdown(key, body, t, cx) {
-    const parts = blocks(body);
-    return v_flex().gap(12).children(parts.map((b, n) => b.image ? this.picture(`${key}-${n}`, b, t, cx)
-      : TextView.markdown(`${key}-${n}`, linkify(b.text, this.repo, this.api)).selectable(true).on_link_click((url, cx) => this.link(url, cx))));
-  }
 
-  // As GitHub sizes one: its width attribute, else its own, never wider than the column.
-  picture(key, b, t, cx) {
-    const loading = loadPicture(b.image);
-    if (loading) cx.spawn(async (cx) => { await loading; cx.notify(); });
-    const p = picture(b.image);
-    if (!p) return div().h(failed(b.image) ? 36 : 120).w_full().flex_none().rounded(6).border_1().border_color(t.border).bg(t.raised)
-      .flex().items_center().justify_center().px(12).text_size(12).text_color(t.muted).truncate()
-      .child(failed(b.image) ? `Image could not be loaded${b.alt ? `: ${b.alt}` : ""}` : "Loading image…");
-    const room = Math.max(240, (this.width ?? 1100) - 60), w = Math.min(b.width ?? p.width, room), h = Math.round(p.height * w / p.width);
-    return div().id(key).flex_none().cursor_pointer().on_click(() => openUrl(p.file)).child(image(p.path).w(w).h(h).rounded(6));
+  // Markdown with its images drawn in between the text; `room` narrows a picture
+  // for a preview that sits beside the sidebar.
+  markdown(key, body, t, cx, room = null) {
+    return markdownView({ key, body, t, cx, room: room ?? (this.width ?? 1100) - 60,
+      repo: this.repo, api: this.api, onLink: (url, cx) => this.link(url, cx) });
   }
 
   // An event on the timeline: a round icon on the line, then who did what, when.
@@ -412,41 +390,45 @@ export class Viewer {
       e.kind === "comment" ? this.card(`item-comment-${n}`, e, t, cx) : this.event(`item-event-${n}`, e, t, cx)])];
   }
 
+  // The comment box, and the buttons that send it: the box is the same one a new
+  // issue's body and an edited body are written in.
   composer(i, t, cx) {
     const open = i.state === "OPEN", busy = Boolean(this.busy), text = Boolean(this.replying);
     const tight = (this.width ?? 600) < 430;
     // Gitee's API can't set its rejected state, and a pull request has no reason.
     const reasons = this.kind === "issue" && this.api.name !== "gitee";
-    const tab = (id, label) => div().id(`item-tab-${id}`).h(32).px(14).flex().items_center().rounded_t(6).text_size(13).cursor_pointer()
-      .when(this.tab === id, (e) => e.bg(t.background).border_1().border_b(0).border_color(t.border).text_color(t.foreground))
-      .when(this.tab !== id, (e) => e.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
-      .on_click((_e, cx) => { this.tab = id; cx.notify(); }).child(label);
+    const footer = v_flex().flex_none()
+      .child(h_flex().px(tight ? 8 : 12).py(10).gap(8).items_center().flex_wrap().justify_end().bg(t.background).border_t(1).border_color(t.border)
+        .when(!tight, (e) => e.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments")))
+        .child(div().flex_1().when(!tight, (e) => e.w(0)))
+        .child(open
+          ? h_flex().gap(0).flex_none()
+            .child(this.button("item-close-done", text && !tight ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
+            .when(reasons, (e) => e.child(this.button("item-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
+          : this.button("item-reopen", text && !tight ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
+        .child(this.button("item-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
+      .when(open && Boolean(this.closeMenu) && reasons, (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
+        .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
+          .map(([glyph, title, note, reason, tint]) => h_flex().id(`item-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
+            .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setState(true, reason, cx))
+            .child(div().pt(2).child(this.glyph(glyph, 16, tint)))
+            .child(v_flex().child(div().text_size(13).font_semibold().child(title)).child(div().text_size(12).text_color(t.muted).child(note)))))));
     return v_flex().flex_none().gap(10)
       .child(div().text_size(16).font_semibold().child("Add a comment"))
-      .child(v_flex().rounded(6).border_1().border_color(t.border).overflow_hidden()
-        .child(h_flex().px(8).pt(8).gap(4).items_end().bg(t.raised).border_b(1).border_color(t.border)
-          .child(tab("write", "Write")).child(tab("preview", "Preview")))
-        .child(this.tab === "write"
-          ? div().id("item-reply").px(12).py(10).bg(t.background).cursor_text().child(Textarea.new(this.reply).w_full().text_size(14).text_color(t.foreground))
-          : div().px(16).py(14).min_h(110).bg(t.background).text_size(14).child(text
-            ? TextView.markdown("item-preview", linkify(this.reply.value(), this.repo, this.api)).on_link_click((url, cx) => this.link(url, cx))
-            : div().text_color(t.muted).child("Nothing to preview")))
-        .child(h_flex().px(tight ? 8 : 12).py(10).gap(8).items_center().flex_wrap().justify_end().bg(t.background).border_t(1).border_color(t.border)
-          .when(!tight, (e) => e.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments")))
-          .child(div().flex_1().when(!tight, (e) => e.w(0)))
-          .child(open
-            ? h_flex().gap(0).flex_none()
-              .child(this.button("item-close-done", text && !tight ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
-              .when(reasons, (e) => e.child(this.button("item-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
-            : this.button("item-reopen", text && !tight ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
-          .child(this.button("item-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
-        .when(open && Boolean(this.closeMenu) && reasons, (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
-          .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
-            .map(([glyph, title, note, reason, tint]) => h_flex().id(`item-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
-              .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setState(true, reason, cx))
-              .child(div().pt(2).child(this.glyph(glyph, 16, tint)))
-              .child(v_flex().child(div().text_size(13).font_semibold().child(title)).child(div().text_size(12).text_color(t.muted).child(note))))))));
+      .child(this.replyBox.render(cx, { t, md: this.previewer("item-preview", t), room: this.columnRoom(), footer }));
   }
+
+  // The markdown a preview draws: this item's repository and links, in the room
+  // the thread column leaves for a picture.
+  previewer(key, t) {
+    return (text, cx, room) => this.markdown(key, text, t, cx, room ?? this.columnRoom());
+  }
+
+  columnRoom() {
+    const w = this.width ?? 1100;
+    return Math.max(240, w - (w >= 620 ? 340 : 90));
+  }
+
 
   section(title, t, body, action = null) {
     return v_flex().flex_none().gap(8).py(14).border_b(1).border_color(t.border)

@@ -1,8 +1,10 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, notify, props, appHome, shared, setShared, settings } from "herdr";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { spaces, panes, focused, exec, hc, run, layout, theme, openOverlay, closeOverlay, notify, props, appHome, shared, setShared } from "herdr";
 import * as fs from "fs/promises";
 import { Viewer, copyMenu } from "./viewer.js";
+import { MarkdownBox } from "./composer.js";
+import { markdownView, openUrl } from "./markdown.js";
 import { Starter } from "./start.js";
 import { icons, icon } from "./icons.js";
 import { providerOf, providerAt, remoteNamed, remoteRepo, ORDER } from "./api.js";
@@ -147,10 +149,9 @@ export default class Issues extends View {
     this.composing = false; this.posting = false; this.postError = null; this.ready = false;
     this.draftTitle = InputState.new({ placeholder: "Title" });
     this.draftTitle.on("change", (_e, cx) => { const ready = Boolean(this.draftTitle.value().trim()); if (ready !== this.ready) { this.ready = ready; cx.notify(); } });
-    // An editor rather than a textarea: it is the one that scrolls inside a box
-    // it was given, so a long body stays inside the panel instead of overflowing it.
-    this.draftBody = EditorState.new({ language: "markdown", value: "", font_family: settings().font_family, font_size: 13, line_numbers: false, soft_wrap: true });
-    this.draftBody.on("submit", (e, cx) => { if (e.secondary) this.create(cx); });
+    // The body in the same box a comment is written in: a markdown toolbar,
+    // write/preview/split and an image row.
+    this.draftBox = new MarkdownBox(cx, { id: "issues-draft", placeholder: "Describe the issue", rows: [4, 40], onSubmit: (cx) => this.create(cx) });
     cx.spawn(async (cx) => { await icons(); this.icons = true; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(SYNC, (cx) => { if (!hidden()) this.refresh(cx); });
@@ -439,8 +440,9 @@ export default class Issues extends View {
         .child(div().text_size(11).text_color(t.muted).truncate().child(text))));
   }
 
-  // The list's place while a new issue is written: a title, a body, and Create
-  // under them. Escape is not wired: Cancel is the way back.
+  // The list's place while a new issue is written: a title, a body in the same
+  // box a comment is written in, and Create under them. The column scrolls, so a
+  // long body stays inside the panel. Escape is not wired: Cancel is the way back.
   form(t, cx) {
     const ready = this.ready && !this.posting;
     const green = "#238636";
@@ -448,18 +450,22 @@ export default class Issues extends View {
       .bg(primary && ready ? green : t.raised).border_1().border_color(primary && ready ? green : t.border).text_color(primary ? "#ffffff" : t.muted)
       .when(primary ? ready : true, (e) => e.cursor_pointer().hover((s) => s.bg(primary ? "#29903b" : t.hover)).on_click(onClick))
       .child(label);
-    return v_flex().id("issues-form").flex_1().min_h(0).p(12).gap(10)
+    return v_flex().id("issues-form").flex_1().min_h(0).overflow_y_scrollbar().p(12).gap(10)
       .child(h_flex().flex_none().h(30).px(9).items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .child(Input.new(this.draftTitle).h_full().text_size(13).text_color(t.foreground)))
-      // The textarea is the height it is given and scrolls inside itself: growing
-      // with its content put the caret's line past the box's edge, half cut off.
-      .child(v_flex().flex_1().min_h(0).rounded(7).border_1().border_color(t.border).overflow_hidden()
-        .child(Editor.new(this.draftBody).flex_1().min_h(0)))
+      .child(this.draftBox.render(cx, { t, md: this.draftPreview(t), room: (this.w ?? 400) - 56 }))
       .when(Boolean(this.postError), (e) => e.child(div().flex_none().text_size(12).text_color(t.ansi1).child(this.postError)))
       .child(h_flex().flex_none().gap(8).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).truncate().child("⌘/Ctrl+Enter creates it"))
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).truncate().child("Markdown is supported · ⌘/Ctrl+Enter creates it"))
         .child(button("issues-cancel", "Cancel", (_e, cx) => { this.composing = false; this.postError = null; cx.notify(); }, false))
         .child(button("issues-create", this.posting ? "Creating…" : "Create issue", (_e, cx) => this.create(cx), true)));
+  }
+
+  // The draft's preview: this repository and its #123 links, in the room the panel
+  // leaves for a picture.
+  draftPreview(t) {
+    return (text, cx, room) => markdownView({ key: "draft-preview", body: text, t, cx,
+      room: room ?? (this.w ?? 400) - 56, repo: this.repo, api: providerOf(this.provider), onLink: (url) => openUrl(url) });
   }
 
   // Create it on the platform, then show it: the list refreshes underneath and the
@@ -469,8 +475,8 @@ export default class Issues extends View {
     if (!title || this.posting || !this.repo) return;
     this.posting = true; this.postError = null; cx.notify();
     try {
-      const made = await providerOf(this.provider).create({ repo: this.repo, title, body: this.draftBody.value(), on: this.repoOn ?? null });
-      this.draftTitle.set_value(""); this.draftBody.set_value(""); this.ready = false;
+      const made = await providerOf(this.provider).create({ repo: this.repo, title, body: this.draftBox.value, on: this.repoOn ?? null });
+      this.draftTitle.set_value(""); this.draftBox.reset(); this.ready = false;
       this.composing = false;
       this.refresh(cx);
       if (made) this.open(made, cx);

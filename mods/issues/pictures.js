@@ -23,7 +23,7 @@ export function blocks(markdown) {
 }
 
 // Width and height from the file's own header.
-function dimensions(b) {
+export function dimensions(b) {
   const u16 = (i) => (b[i] << 8) | b[i + 1], u32 = (i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
   const ascii = (from, to) => String.fromCharCode(...b.slice(from, to));
   if (b[0] === 0x89 && ascii(1, 4) === "PNG") return { width: u32(16), height: u32(20) };
