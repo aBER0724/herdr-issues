@@ -16,7 +16,7 @@ A GitHub and Gitee issues panel for the [Herdr](https://herdr.dev) desktop app. 
 - **Fast.** Issues are cached per repository. After the first fetch, only what changed since the last sync is fetched, every 30 seconds while the panel is open.
 - **A GitHub-style view, in the panel.** The timeline as github.com draws it: comments with avatars, roles and reactions, and the events between them (labels, assignments, references, commits, closing). Markdown with tables, code and screenshots (also from private repositories), `#123` links that open in place with Back, a comment box with a markdown toolbar and a live preview, an Edit on the first card that turns the title and body of an item you wrote into a field and that same box in place, and a sidebar for assignees, labels, milestone, linked pull requests and participants. On Gitee the timeline is its comments, the state pill shows Gitee's own state (意向, 进行中, 已完成, 已拒绝), and linked pull requests aren't listed. In a narrow panel the sidebar folds into a line under the title, and under 430px the hint text and the longer button labels give way first; drag the panel wider and they come back. A title with Chinese in it wraps as text with its number on the next line, since it has no spaces to break at.
 
-![Issue view](issue.png)
+![Issue view, with a comment being written in markdown and the live preview under it](issue.png)
 
 ## Install
 
