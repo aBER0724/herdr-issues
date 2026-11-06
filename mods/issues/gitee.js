@@ -113,6 +113,11 @@ function pull(p, repo) {
     closedByPullRequestsReferences: [],
     // The branches Start work's brief sends the agent to.
     head: p.head?.ref ?? null, base: p.base?.ref ?? null,
+    // Gitee says whether it can be merged and nothing about reviews, so a
+    // review's verdict is written but never read back.
+    mergeable: typeof p.mergeable === "boolean" ? p.mergeable : null,
+    mergeState: null, reviewDecision: null, reviews: [],
+    crossRepo: Boolean(p.head?.repo?.full_name && p.base?.repo?.full_name && p.head.repo.full_name !== p.base.repo.full_name),
     url: p.html_url ?? `https://gitee.com/${repo}/pulls/${p.number}`,
   };
 }
@@ -171,6 +176,21 @@ export const gitee = {
       .map((c) => ({ event: "commented", user: c.user, created_at: c.created_at, body: c.body }));
   },
 
+  // A pull request's changed files, with the patch each one carries (`patch.diff`;
+  // an issue has none). Gitee names no status: flags do, and its counts are strings.
+  async files({ kind, repo, number }) {
+    if (kind !== "pull") return [];
+    const rows = await pages(`${path(repo, kind)}/${number}/files`, {}, 3);
+    return rows.map((f) => ({
+      path: f.new_path ?? f.filename,
+      from: f.renamed_file ? f.old_path ?? null : null,
+      status: f.new_file ? "added" : f.deleted_file ? "removed" : f.renamed_file ? "renamed" : "modified",
+      additions: Number(f.additions ?? 0), deletions: Number(f.deletions ?? 0),
+      patch: typeof f.patch === "string" ? f.patch : f.patch?.diff ?? null,
+      tooLarge: Boolean(f.too_large),
+    }));
+  },
+
   async me() {
     if (!await token()) return null;
     const user = await request("/user").catch(() => null);
@@ -179,6 +199,19 @@ export const gitee = {
 
   async comment({ kind, repo, number, body }) {
     await request(`${path(repo, kind)}/${number}/comments`, { method: "POST", body: { body } });
+  },
+
+  // One verdict and no body: Gitee's review takes `force`, true to pass and
+  // false to reject, so a review's text goes in as an ordinary comment.
+  async review({ repo, number, event, body }) {
+    if (event !== "comment") await request(`/repos/${repo}/pulls/${number}/review`, { method: "POST", body: { force: event === "approve" } });
+    if (body) await gitee.comment({ kind: "pull", repo, number, body });
+  },
+
+  // Gitee merges where it reads, with the method asked for: merge, squash or
+  // rebase. A merge it refuses answers with its own message.
+  async merge({ repo, number, method }) {
+    await request(`/repos/${repo}/pulls/${number}/merge`, { method: "PUT", body: { merge_method: method } });
   },
 
   async setState({ kind, repo, number, close, body }) {

@@ -26,6 +26,9 @@ const folderName = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(
 const baseName = (path) => (path ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
 // issue/12-fix-the-export, or just issue/12 when the title is all Chinese and leaves no words.
 const branchFor = (mode, p) => {
+  // Resolving conflicts lands on the pull request's own branch: that is the one
+  // the base has to be merged into.
+  if (mode === "conflict") return p.head || `conflict/${p.number}`;
   const slug = (p.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
   const prefix = { review: "review", fix: "fix" }[mode] ?? "issue";
   return slug ? `${prefix}/${p.number}-${slug}` : `${prefix}/${p.number}`;
@@ -37,7 +40,7 @@ const worktreePath = (home, main, branch) => `${home}/${WORKTREES}/${baseName(ma
 // author's, so it can't pass itself off as the person's instructions.
 export const MODES = {
   issue: [["work", "Work on it"]],
-  pull: [["review", "Review"], ["fix", "Fix"]],
+  pull: [["review", "Review"], ["fix", "Fix"], ["conflict", "Resolve conflicts"]],
 };
 export const DEFAULTS = {
   work: `处理 {provider} 上的 {ref}：{title}
@@ -66,6 +69,16 @@ export const DEFAULTS = {
 3. 逐条改，一条一个 commit；跑覆盖这次改动的测试。
 
 不要 push，不要在平台上回复或改这个 PR。做完逐条列出：改了什么，或者为什么没改。`,
+  conflict: `合并冲突：pull request {ref} 的 head 是 {head}，base 是 {base}。
+{url}
+
+这个 worktree 已经在 {branch} 上，并且已经把 origin/{base} 合了进来。冲突的文件：
+{conflicts}
+
+1. 逐个文件解冲突，保留两边的意图，不要用 --ours / --theirs 整文件丢弃一侧。
+2. 解完把冲突标记清干净（grep -rn '<<<<<<<' 应该没有结果），跑仓库的测试 / lint / build。
+3. 把这个 merge 提交在这个分支上。
+不要 push，不要在平台上改这个 PR。做完列出每个冲突文件是怎么解的、哪些没有验证到。`,
 };
 
 // Line ends become \n first (a lone \r would reach the agent's terminal as Enter), then
@@ -121,7 +134,10 @@ export class Starter {
     this.on = p.on ?? null;
     this.modes = MODES[p.kind] ?? MODES.issue;
     const saved = shared(MODE) ?? {};
-    this.mode = this.modes.some(([id]) => id === saved[p.kind]) ? saved[p.kind] : this.modes[0][0];
+    // The dialog's own props pick the mode first (the merge box's Resolve
+    // conflicts opens it on that one), then the mode last used for this kind.
+    const asked = p.mode ?? saved[p.kind];
+    this.mode = this.modes.some(([id]) => id === asked) ? asked : this.modes[0][0];
     this.mine = shared(PROMPTS) ?? {};
     this.agents = []; this.agent = null; this.models = []; this.model = null; this.effort = null;
     this.loadingModels = false; this.modelsError = null;
@@ -376,11 +392,33 @@ export class Starter {
     const added = await git(main, add, on);
     if (!added.ok) throw new Error(firstLine(added.err) || "git worktree add failed.");
 
+    // Resolving conflicts: the base is merged into the head inside the worktree,
+    // so the agent starts with the conflicts in front of it rather than hunting
+    // for them. A head that only the platform has (a fork's) is fetched first.
+    let conflicts = [];
+    if (this.mode === "conflict") {
+      if (!p.base) throw new Error("This pull request names no base branch.");
+      if (state === "new") {
+        const fetched = await git(path, ["fetch", "origin", `pull/${p.number}/head`], on);
+        if (!fetched.ok) throw new Error(firstLine(fetched.err) || `Cannot fetch pull request ${p.ref ?? `#${p.number}`}.`);
+        await git(path, ["reset", "--hard", "FETCH_HEAD"], on);
+      }
+      await git(path, ["fetch", "origin", p.base], on);
+      const merged = await git(path, ["merge", "--no-ff", "--no-edit", `origin/${p.base}`], on);
+      const named = await git(path, ["diff", "--name-only", "--diff-filter=U"], on);
+      conflicts = named.out.split("\n").map((row) => row.trim()).filter(Boolean);
+      if (!merged.ok && !conflicts.length) throw new Error(firstLine(merged.err) || `Merging origin/${p.base} failed.`);
+      if (!conflicts.length) notify({ title: "Nothing to resolve", body: `${p.base} merged cleanly into ${branch}`, level: "success", timeout: 4000 });
+    }
+    const task = this.mode === "conflict"
+      ? fill(brief, { conflicts: conflicts.length ? conflicts.join("\n") : "（没有冲突：base 已经干净地合进来）" })
+      : brief;
+
     setShared(AGENT, { key: this.agent.key, model: this.chosenModel(), effort: this.effort });
     if (this.edited) setShared(PROMPTS, { ...(shared(PROMPTS) ?? {}), [`${p.kind}.${this.mode}`]: this.prompt.value() });
     run("space.new", {
       name: cut(`${baseName(main)} ${p.ref ?? `#${p.number}`}`, 40), folder: path, tab: this.agent.name,
-      argv: [...this.agent.run, ...extra], task: brief, ...(on ? { machine: on } : {}),
+      argv: [...this.agent.run, ...extra], task, ...(on ? { machine: on } : {}),
     });
     notify({ title: `Started ${this.agent.name}`, body: cut(`${p.ref ?? `#${p.number}`} ${p.title ?? ""}`, 110), level: "success", timeout: 4000 });
   }

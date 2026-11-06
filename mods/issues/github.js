@@ -6,7 +6,7 @@ export const DETAIL = `${FIELDS},milestone,closedByPullRequestsReferences,reacti
 // A pull request has no stateReason, and has a merged state of its own, a draft
 // flag and the issues it closes.
 const PULL = "number,title,body,author,state,labels,assignees,createdAt,updatedAt,comments,url,milestone,reactionGroups,isDraft,mergedAt,headRefName,baseRefName";
-const PULL_DETAIL = `${PULL},closingIssuesReferences`;
+const PULL_DETAIL = `${PULL},closingIssuesReferences,mergeable,mergeStateStatus,reviewDecision,latestReviews,isCrossRepository`;
 
 async function gh(args, on) {
   const r = await exec("gh", args, { on });
@@ -23,6 +23,19 @@ const pull = (i) => ({
   stateText: i.isDraft && i.state === "OPEN" ? "Draft" : null,
   // The branches Start work's brief sends the agent to.
   head: i.headRefName ?? null, base: i.baseRefName ?? null,
+  // Whether it merges, and what its reviews say. `gh pr view` answers UNKNOWN
+  // until GitHub has worked it out, so the view asks once more.
+  mergeable: i.mergeable ?? null, mergeState: i.mergeStateStatus ?? null,
+  reviewDecision: i.reviewDecision || null,
+  reviews: (i.latestReviews ?? []).map((r) => ({ login: r.author?.login ?? "ghost", state: r.state })),
+  crossRepo: Boolean(i.isCrossRepository),
+});
+
+// One changed file of a pull request, as the panel draws it. GitHub leaves the
+// patch out for a binary file and for one over 3000 lines changed.
+const changed = (f) => ({
+  path: f.filename, from: f.previous_filename ?? null, status: f.status ?? "modified",
+  additions: f.additions ?? 0, deletions: f.deletions ?? 0, patch: f.patch ?? null,
 });
 
 export const github = {
@@ -68,12 +81,35 @@ export const github = {
     return pages ? pages.flat() : null;
   },
 
+  // The files a pull request changes, each with its patch, a page of 100 at a
+  // time. An issue has no files: the panel only asks for a pull request's.
+  async files({ repo, number, on }) {
+    const pages = await json(["api", "--paginate", "--slurp", `repos/${repo}/pulls/${number}/files?per_page=100`], on);
+    return pages.flat().map(changed);
+  },
+
   async me({ on }) {
     return gh(["api", "user", "-q", ".login"], on).catch(() => null);
   },
 
   async comment({ kind, repo, number, body, on }) {
     await gh([kind === "pull" ? "pr" : "issue", "comment", String(number), "-R", repo, "--body", body], on);
+  },
+
+  // A review's conclusion, with the box's text as its body: gh's own flags, so
+  // an approve with nothing to say is one without `--body`.
+  async review({ repo, number, event, body, on }) {
+    const flag = { approve: "--approve", request: "--request-changes", comment: "--comment" }[event];
+    const args = ["pr", "review", String(number), "-R", repo, flag];
+    if (body) args.push("--body", body);
+    await gh(args, on);
+  },
+
+  // Merged the way asked: gh picks the method from the flag, and says why when
+  // checks, reviews or conflicts keep it from merging.
+  async merge({ repo, number, method, on }) {
+    const flag = method === "squash" ? "--squash" : method === "rebase" ? "--rebase" : "--merge";
+    await gh(["pr", "merge", String(number), "-R", repo, flag], on);
   },
 
   // Closing or reopening takes the comment box along, as gh does with --comment.

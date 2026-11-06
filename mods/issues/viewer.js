@@ -1,8 +1,9 @@
 import { div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, Input, InputState } from "gpui-base";
-import { exec, run, home, knownAgents, spaces, shared, theme, openOverlay, setShared } from "herdr";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, TextView, Input, InputState } from "gpui-base";
+import { exec, run, home, knownAgents, spaces, shared, settings, theme, openOverlay, setShared } from "herdr";
 import { icons, icon, avatarPath, loadAvatar } from "./icons.js";
 import { openUrl, markdownView } from "./markdown.js";
+import { lines as patchLines, LETTER } from "./diff.js";
 import { MarkdownBox } from "./composer.js";
 import { providerOf, providerAt } from "./api.js";
 
@@ -17,6 +18,9 @@ const EMOJI = {
 const ROLES = { OWNER: "Owner", MEMBER: "Member", COLLABORATOR: "Collaborator", CONTRIBUTOR: "Contributor" };
 // A title with these has no spaces to wrap at: it wraps as text, not word by word.
 const CJK = /[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]/;
+// A pull request's changes: a file's row, a line of its patch, and the cap on
+// how much of a long diff is drawn. Past it the web page has the rest.
+const FILE_ROW = 28, LINE_ROW = 18, HUNK_ROW = 18, NOTE_ROW = 24, DIFF_ROWS = 8000;
 
 // As GitHub says it: "3h ago" this month, "on Sep 21" before that.
 export function ago(iso) {
@@ -116,6 +120,15 @@ export class Viewer {
     this.folder = folder;
     this.api = providerOf(provider); this.onBack = onBack;
     this.history = []; this.cache = {}; this.timelines = {}; this.labels = {};
+    // A pull request opens on its conversation and keeps its changes a tab
+    // away: `files` holds them per item, `folded` the files whose patch is
+    // shut, and `rows` the list they are drawn from.
+    this.tab = "conversation";
+    this.files = {}; this.filesBusy = {}; this.filesError = null;
+    this.folded = new Set(); this.rows = null; this.span = 320;
+    // A pull request's own actions: the review and merge menus under their
+    // buttons, and the one re-read that asks GitHub again whether it merges.
+    this.reviewMenu = false; this.mergeMenu = false; this.rechecking = false;
     if (data) this.cache[`${this.kind}:${repo}#${number}`] = data;
     // The comment box: a markdown box whose text drives the Comment button.
     this.replyBox = new MarkdownBox(cx, {
@@ -134,19 +147,119 @@ export class Viewer {
     this.load(cx);
   }
 
-  // Start work: the dialog does the worktree, the branch, the harness and the brief. A
-  // space already showing that worktree is opened instead, without asking.
-  startWork() {
+  // Start work: the dialog does the worktree, the branch, the harness and the
+  // brief. `mode` says what the agent is asked to do — for a pull request,
+  // Review, Fix, or Resolve conflicts, which merges the base into its head in
+  // the worktree first.
+  startWork(mode) {
     if (!this.issue) return;
-    openOverlay({ mod: "issues", kind: "dialog", width: 660, height: 720, props: { start: startProps(this) } });
+    openOverlay({ mod: "issues", kind: "dialog", width: 660, height: 720,
+      props: { start: { ...startProps(this), ...(mode ? { mode } : {}) } } });
+  }
+
+  // GitHub answers UNKNOWN until it has worked the merge out: one more look a
+  // moment later, and the same item is redrawn with the answer.
+  recheck(id, cx) {
+    if (this.rechecking) return;
+    this.rechecking = true;
+    const repo = this.repo, number = this.number, on = this.on, api = this.api;
+    cx.spawn(async (cx) => {
+      try {
+        await cx.sleep(2500);
+        const item = await api.view({ kind: "pull", repo, number, on });
+        if (this.id() === id && item?.mergeable && item.mergeable !== "UNKNOWN") { this.cache[id] = item; this.issue = item; }
+      } catch { /* the next open asks again */ }
+      finally { this.rechecking = false; cx.notify(); }
+    });
+  }
+
+  // Approve or ask for changes: the platform takes the verdict with the box's
+  // text, the box empties, and the item reloads with the review state on it.
+  // Request changes needs that text — the reason is the point of it.
+  review(event, cx) {
+    const body = this.reply.value().trim();
+    if (event === "request" && !body) return;
+    this.reviewMenu = false; this.closeMenu = false;
+    this.change(event === "approve" ? "Approving" : "Requesting changes",
+      () => this.api.review({ kind: this.kind, repo: this.repo, number: this.number, event, body, on: this.on }), cx, () => this.cleared());
+  }
+
+  // Merged the way it was asked, then reloaded: the state pill reads Merged and
+  // the panel's list follows through `issues.changed`.
+  merge(method, cx) {
+    this.mergeMenu = false;
+    this.change("Merging", () => this.api.merge({ kind: this.kind, repo: this.repo, number: this.number, method, on: this.on }), cx);
   }
 
   id() { return `${this.kind}:${this.repo}#${this.number}`; }
+
+  // ---- the changes ----
+
+  // Which half of a pull request shows: its conversation, or its changes. The
+  // changes are fetched the first time they are asked for.
+  setTab(tab, cx) {
+    if (this.tab === tab) return;
+    this.tab = tab; this.filesError = null;
+    if (tab === "files") this.loadFiles(cx);
+    cx.notify();
+  }
+
+  // A pull request's files and their patches: once per open, and again on
+  // Refresh, which drops them before it reloads the item.
+  loadFiles(cx) {
+    const id = this.id(), repo = this.repo, number = this.number, on = this.on, api = this.api;
+    if (this.filesBusy[id]) return;
+    this.filesBusy[id] = true; this.filesError = null;
+    cx.spawn(async (cx) => {
+      try {
+        const files = await api.files({ kind: "pull", repo, number, on });
+        if (this.id() === id) { this.files[id] = files ?? []; this.rows = null; }
+      } catch (e) { if (this.id() === id) this.filesError = String(e?.message ?? e); }
+      finally { this.filesBusy[id] = false; cx.notify(); }
+    });
+  }
+
+  // A file's row folds its patch away and back.
+  fold(key, cx) {
+    if (!key.startsWith("file:")) return;
+    const file = this.files[this.id()]?.[Number(key.slice(5))];
+    if (!file) return;
+    const path = file.path;
+    if (this.folded.has(path)) this.folded.delete(path); else this.folded.add(path);
+    this.rows = null;
+    cx.notify();
+  }
+
+  // The list the changes pane draws: a row per file, then its patch's lines
+  // while the file is open. Built once per load or fold, and capped: a diff of
+  // ten thousand lines costs a frame every scroll, and the web page has it all.
+  changeRows(files) {
+    const rows = [];
+    files.forEach((file, index) => {
+      rows.push({ kind: "file", key: `file:${index}`, file, open: !this.folded.has(file.path) });
+      if (this.folded.has(file.path)) return;
+      if (!file.patch) {
+        rows.push({ kind: "note", key: `note:${index}`,
+          text: file.tooLarge ? "Too large to show here — open it on the web" : "No text diff: a binary file, or a patch this long is left out" });
+        return;
+      }
+      patchLines(file.patch).forEach((line, n) => rows.push({ ...line, key: `line:${index}:${n}` }));
+    });
+    if (rows.length > DIFF_ROWS) {
+      rows.length = DIFF_ROWS;
+      rows.push({ kind: "note", key: "more", text: "The rest of this diff is on the web page" });
+    }
+    let longest = 0;
+    for (const r of rows) longest = Math.max(longest, r.text?.length ?? 0);
+    this.span = Math.min(2400, Math.max(320, Math.round(longest * 6.6) + 104));
+    return rows;
+  }
 
   load(cx) {
     const repo = this.repo, number = this.number, kind = this.kind, id = this.id(), on = this.on, api = this.api;
     const current = () => this.id() === id;
     this.issue = this.cache[id] ?? null; this.error = null; this.loading = true;
+    delete this.files[id];
     cx.spawn(async (cx) => {
       try {
         const [item, raw] = await Promise.all([
@@ -156,6 +269,10 @@ export class Viewer {
         this.cache[id] = item;
         if (raw) this.timelines[id] = timeline(raw);
         if (current()) this.issue = item;
+        if (current() && this.tab === "files") this.loadFiles(cx);
+        // A pull request's mergeability comes back UNKNOWN until GitHub has
+        // worked it out: ask once more rather than sit on "checking".
+        if (current() && kind === "pull" && item.mergeable === "UNKNOWN") this.recheck(id, cx);
       } catch (e) { if (current()) this.error = String(e?.message ?? e); }
       finally { if (current()) { this.loading = false; cx.notify(); } }
     });
@@ -165,6 +282,7 @@ export class Viewer {
     if (repo === this.repo && kind === this.kind && number === this.number) return;
     this.history.push({ repo: this.repo, kind: this.kind, number: this.number });
     this.repo = repo; this.kind = kind; this.number = number; this.editing = false; this.editingBody = false; this.closeMenu = false;
+    this.tab = "conversation"; this.filesError = null; this.reviewMenu = false; this.mergeMenu = false;
     this.load(cx); cx.notify();
   }
 
@@ -172,6 +290,7 @@ export class Viewer {
     const prev = this.history.pop();
     if (!prev) { this.onBack(cx); return; }
     this.repo = prev.repo; this.kind = prev.kind; this.number = prev.number; this.editing = false; this.editingBody = false; this.closeMenu = false;
+    this.tab = "conversation"; this.filesError = null; this.reviewMenu = false; this.mergeMenu = false;
     this.load(cx); cx.notify();
   }
 
@@ -264,6 +383,84 @@ export class Viewer {
   }
 
   // ---- drawing ----
+
+  // A tab over the changes: its title over a 2px underline in GitHub's link
+  // blue while it shows.
+  tabButton(id, label, on, t, onClick) {
+    return h_flex().id(`item-tab-${id}`).h(34).px(10).flex_none().items_center().cursor_pointer()
+      .border_b(2).border_color(on ? GITHUB.link : t.background)
+      .text_size(13).font_semibold().text_color(on ? t.foreground : t.muted)
+      .hover((s) => s.text_color(t.foreground)).on_click(onClick)
+      .child(label);
+  }
+
+  // Conversation | Files changed, for a pull request only, under its title.
+  tabs(t, cx) {
+    const pad = (this.width ?? 600) < 620 ? 14 : 32;
+    return h_flex().flex_none().px(pad).gap(6).border_b(1).border_color(t.border)
+      .child(this.tabButton("conversation", "Conversation", this.tab !== "files", t, (_e, cx) => this.setTab("conversation", cx)))
+      .child(this.tabButton("files", "Files changed", this.tab === "files", t, (_e, cx) => this.setTab("files", cx)));
+  }
+
+  // Files changed: a line for every file with its additions and deletions and
+  // its patch under it, both line numbers down the side as github.com numbers
+  // them. A file's line folds its patch away; the list is virtual, since a pull
+  // request can change more lines than a frame would survive.
+  changesPane(t, cx) {
+    const id = this.id(), files = this.files[id];
+    const empty = (text, color) => v_flex().flex_1().min_h(0).items_center().justify_center().px(28)
+      .child(div().text_size(12).text_center().text_color(color ?? t.muted).child(text));
+    if (this.filesError) return empty(this.filesError, t.ansi1);
+    if (!files) return empty(this.filesBusy[id] ? "Loading files changed…" : "The changes did not load");
+    if (!files.length) return empty("This pull request changes no files");
+    const adds = files.reduce((n, f) => n + (f.additions ?? 0), 0), dels = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
+    if (!this.rows) this.rows = this.changeRows(files);
+    const rows = this.rows;
+    const list = v_virtual_list(`${id}-changes`, rows.length,
+      rows.map((r) => (r.kind === "file" ? FILE_ROW : r.kind === "note" ? NOTE_ROW : r.kind === "@" ? HUNK_ROW : LINE_ROW)),
+      (n) => rows[n].key,
+      (range) => rows.slice(range.start, range.end).map((r) => this.changeLine(r, t)))
+      .on_item_click((key, cx) => this.fold(key, cx));
+    const head = h_flex().h(30).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border).text_size(11.5).text_color(t.muted)
+      .child(div().flex_none().child(`${files.length} file${files.length === 1 ? "" : "s"} changed`))
+      .when(adds > 0, (e) => e.child(div().text_color(t.ansi2).child(`+${adds}`)))
+      .when(dels > 0, (e) => e.child(div().text_color(t.ansi1).child(`−${dels}`)))
+      .child(div().flex_1().min_w(0).truncate().text_right().child(this.filesBusy[id] ? "Loading…" : ""));
+    return v_flex().flex_1().min_h(0).min_w(0)
+      .child(head)
+      .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11.5)
+        .child(div().id(`${id}-changes-x`).size_full().overflow_x_scrollbar()
+          .child(div().w_full().min_w(this.span).h_full().child(list)))
+        .child(Scrollbar.vertical(`${id}-changes`).viewport_from_layout().absolute().inset_0()));
+  }
+
+  // One row of the changes: a file's header, a hunk's header or note, or a line
+  // of a patch with the number it has on each side.
+  changeLine(r, t) {
+    if (r.kind === "file") {
+      const f = r.file, adds = f.additions ?? 0, dels = f.deletions ?? 0;
+      const tint = f.status === "added" ? t.ansi2 : f.status === "removed" || f.status === "deleted" ? t.ansi1
+        : f.status === "renamed" || f.status === "copied" ? GITHUB.link : t.muted;
+      return h_flex().w_full().h(FILE_ROW).flex_none().px(8).gap(6).items_center().overflow_hidden().cursor_pointer()
+        .bg(t.raised).border_t(1).border_color(t.border)
+        .child(div().w(10).flex_none().text_size(10).text_color(t.muted).child(r.open ? "▾" : "▸"))
+        .child(div().w(10).flex_none().text_size(10).font_semibold().text_color(tint).child(LETTER[f.status] ?? "M"))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().child(f.from ? `${f.from} → ${f.path}` : f.path))
+        .when(adds > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${adds}`)))
+        .when(dels > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${dels}`)));
+    }
+    if (r.kind === "note") return h_flex().w_full().h(NOTE_ROW).flex_none().px(28).items_center().overflow_hidden()
+      .child(div().truncate().text_size(11).text_color(t.dim).child(r.text));
+    if (r.kind === "@") return div().w_full().h(HUNK_ROW).flex_none().px(8).overflow_hidden().truncate()
+      .bg(t.raised).text_size(11).text_color(t.dim).child(r.text);
+    const color = r.kind === "+" ? t.ansi2 : r.kind === "-" ? t.ansi1 : t.foreground;
+    return h_flex().w_full().h(LINE_ROW).flex_none().gap(6).overflow_hidden()
+      .when(r.kind === "+" || r.kind === "-", (e) => e.bg(color + "18"))
+      .child(div().w(26).flex_none().text_right().text_color(t.dim).child(r.kind === "-" || r.kind === " " ? String(r.old ?? "") : ""))
+      .child(div().w(26).flex_none().text_right().text_color(t.dim).child(r.kind === "+" || r.kind === " " ? String(r.next ?? "") : ""))
+      .child(div().w(8).flex_none().text_color(color).child(r.kind === "-" || r.kind === "+" ? r.kind : ""))
+      .child(div().flex_1().min_w(0).whitespace_nowrap().text_color(r.kind === " " ? t.foreground : color).child(r.text || " "));
+  }
 
   pic(name, url, size, t, cx) {
     const loading = loadAvatar(name, url);
@@ -397,6 +594,7 @@ export class Viewer {
     const tight = (this.width ?? 600) < 430;
     // Gitee's API can't set its rejected state, and a pull request has no reason.
     const reasons = this.kind === "issue" && this.api.name !== "gitee";
+    const pull = this.kind === "pull";
     const footer = v_flex().flex_none()
       .child(h_flex().px(tight ? 8 : 12).py(10).gap(8).items_center().flex_wrap().justify_end().bg(t.background).border_t(1).border_color(t.border)
         .when(!tight, (e) => e.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child("Markdown is supported · ⌘/Ctrl+Enter comments")))
@@ -406,11 +604,20 @@ export class Viewer {
             .child(this.button("item-close-done", text && !tight ? "Close with comment" : "Close", t, (_e, cx) => this.setState(true, "completed", cx), { enabled: !busy, glyph: "done", tint: GITHUB.done }))
             .when(reasons, (e) => e.child(this.button("item-close-more", "▾", t, (_e, cx) => { this.closeMenu = !this.closeMenu; cx.notify(); }, { enabled: !busy })))
           : this.button("item-reopen", text && !tight ? "Reopen with comment" : "Reopen", t, (_e, cx) => this.setState(false, null, cx), { enabled: !busy, glyph: "issue", tint: GITHUB.open }))
+        .when(pull, (e) => e.child(this.button("item-review", tight ? "" : "Review", t, (_e, cx) => { this.reviewMenu = !this.reviewMenu; this.closeMenu = false; cx.notify(); }, { enabled: !busy, glyph: "done", tint: GITHUB.open })))
         .child(this.button("item-comment", "Comment", t, (_e, cx) => this.comment(cx), { primary: true, enabled: text && !busy })))
       .when(open && Boolean(this.closeMenu) && reasons, (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
         .children([["done", "Close as completed", "Done, closed, fixed, resolved", "completed", GITHUB.done], ["skipped", "Close as not planned", "Won't fix, can't repro, stale", "not planned", GITHUB.skipped]]
           .map(([glyph, title, note, reason, tint]) => h_flex().id(`item-close-${reason}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
             .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.setState(true, reason, cx))
+            .child(div().pt(2).child(this.glyph(glyph, 16, tint)))
+            .child(v_flex().child(div().text_size(13).font_semibold().child(title)).child(div().text_size(12).text_color(t.muted).child(note)))))))
+      .when(pull && Boolean(this.reviewMenu), (e) => e.child(v_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.raised)
+        .children([["done", "Approve", "Approve this pull request", "approve", GITHUB.open, true],
+          ["skipped", "Request changes", "Ask for changes: your text is the reason", "request", GITHUB.skipped, text]]
+          .map(([glyph, title, note, event, tint, enabled]) => h_flex().id(`item-review-${event}`).px(8).py(6).gap(10).items_start().rounded(6)
+            .when(enabled && !busy, (f) => f.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.review(event, cx)))
+            .when(!enabled || busy, (f) => f.opacity(0.5))
             .child(div().pt(2).child(this.glyph(glyph, 16, tint)))
             .child(v_flex().child(div().text_size(13).font_semibold().child(title)).child(div().text_size(12).text_color(t.muted).child(note)))))));
     return v_flex().flex_none().gap(10)
@@ -532,11 +739,70 @@ export class Viewer {
             .child(this.glyph(glyph, narrow ? 13 : 16, "#ffffff")).child(state))
           .when(pull, (e) => e.child(div().text_size(12).text_color(t.muted).child("Pull request"))))
         .when(narrow && (i.labels.length > 0 || i.milestone?.title || i.assignees.length > 0), (e) => e.child(this.meta(i, t))))
-      .child(h_flex().flex_1().min_h(0).items_start()
-        .child(v_flex().id(`item-thread-${this.id()}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().pl(pad).pr(narrow ? pad : 24).py(16)
-          .children(this.thread(i, t, cx))
-          .child(div().flex_none().h(24)).child(this.composer(i, t, cx))
-          .child(div().flex_none().h(24)))
-        .when(!narrow, (e) => e.child(this.sidebar(i, t, cx))));
+      .when(pull, (e) => e.child(this.tabs(t, cx)))
+      .child(this.tab === "files" && pull ? this.changesPane(t, cx) : this.conversation(i, t, cx));
+  }
+
+  // The conversation: the timeline and the comment box on the left, the sidebar
+  // on the right where the panel is wide enough to hold one.
+  conversation(i, t, cx) {
+    const narrow = (this.width ?? 600) < 620, pad = narrow ? 14 : 32;
+    const merge = this.mergeBox(i, t, cx);
+    return h_flex().flex_1().min_h(0).items_start()
+      .child(v_flex().id(`item-thread-${this.id()}`).flex_1().min_w(0).h_full().overflow_y_scrollbar().pl(pad).pr(narrow ? pad : 24).py(16)
+        .children(this.thread(i, t, cx))
+        .child(div().flex_none().h(24)).child(this.composer(i, t, cx))
+        .when(Boolean(merge), (e) => e.child(div().flex_none().h(24)).child(merge))
+        .child(div().flex_none().h(24)))
+      .when(!narrow, (e) => e.child(this.sidebar(i, t, cx)));
+  }
+
+  // The merge at the foot of a pull request's conversation, where github.com
+  // puts it: what stands in the way — conflicts, a review, a branch whose
+  // mergeability GitHub is still working out — and the buttons to merge it or
+  // to hand the conflicts to an agent. A merged or closed one just says so.
+  mergeBox(i, t, cx) {
+    if (this.kind !== "pull") return null;
+    const busy = Boolean(this.busy), narrow = (this.width ?? 600) < 430;
+    const open = i.state === "OPEN", merged = i.state === "MERGED";
+    const conflicts = i.mergeable === "CONFLICTING" || i.mergeable === false || i.mergeState === "DIRTY";
+    const checking = open && !conflicts && i.mergeable === "UNKNOWN";
+    const changes = i.reviewDecision === "CHANGES_REQUESTED", required = i.reviewDecision === "REVIEW_REQUIRED";
+    const blocked = changes || required || i.mergeState === "BLOCKED";
+    const [glyph, tint, line] = merged ? ["done", GITHUB.done, "This pull request is merged"]
+      : !open ? ["skipped", t.muted, "Closed without merging"]
+      : conflicts ? ["skipped", t.ansi1, "This branch has conflicts that must be resolved"]
+      : checking ? ["pull", t.muted, "Checking whether it can be merged…"]
+      : changes ? ["skipped", GITHUB.skipped, "Merging is blocked: changes were requested"]
+      : required ? ["skipped", GITHUB.skipped, "Merging is blocked: a review is required"]
+      : blocked ? ["skipped", GITHUB.skipped, "Merging is blocked: a check or a review is missing"]
+      : ["done", GITHUB.open, "This branch can be merged"];
+    const said = (i.reviews ?? []).map((r) => `${r.login} ${r.state === "APPROVED" ? "approved" : r.state === "CHANGES_REQUESTED" ? "asked for changes" : "reviewed"}`).join(" · ");
+    const ready = open && !conflicts && !checking && !blocked;
+    return v_flex().flex_none().gap(10).p(14).rounded(6).border_1().border_color(t.border).bg(t.raised)
+      .child(div().text_size(12).font_semibold().text_color(t.muted).child("Merge"))
+      .child(h_flex().gap(6).items_center().flex_wrap().text_size(13)
+        .child(this.glyph(glyph, 14, tint))
+        .child(div().text_color(merged ? GITHUB.done : conflicts || blocked ? t.ansi1 : t.foreground).child(line)))
+      .when(Boolean(said) && (merged || changes || required), (e) => e.child(div().text_size(11.5).text_color(t.muted).child(said)))
+      // Conflicts are the agent's: a worktree on the head branch, the base
+      // merged into it, and a brief that says to resolve them there.
+      .when(conflicts && !merged, (e) => e.child(v_flex().gap(6)
+        .child(h_flex().gap(8).items_center().flex_wrap()
+          .child(this.button("item-resolve", narrow ? "Resolve" : "Resolve conflicts", t, (_e, cx) => this.startWork("conflict"), { enabled: !busy, glyph: "work" })))
+        .when(i.crossRepo, (f) => f.child(div().text_size(11).text_color(t.dim)
+          .child("The head branch belongs to a fork: the resolution stays on your machine until you push it there.")))))
+      .when(ready, (e) => e.child(h_flex().gap(0).items_center().flex_wrap()
+        .child(this.button("item-merge", narrow ? "Merge" : "Merge pull request", t, (_e, cx) => this.merge("merge", cx), { primary: true, enabled: !busy, glyph: "pull" }))
+        .child(this.button("item-merge-more", "▾", t, (_e, cx) => { this.mergeMenu = !this.mergeMenu; cx.notify(); }, { enabled: !busy }))))
+      .when(open && !ready && !conflicts && !checking, (e) => e.child(this.button("item-merge-blocked", narrow ? "Merge" : "Merge pull request", t, () => {}, { primary: true, enabled: false })))
+      .when(open && Boolean(this.mergeMenu) && ready, (e) => e.child(v_flex().gap(1)
+        .children([["merge", "Create a merge commit", "All commits, plus a merge commit"],
+          ["squash", "Squash and merge", "One commit with one message"],
+          ["rebase", "Rebase and merge", "One commit per change, no merge commit"]]
+          .map(([id, title, note]) => h_flex().id(`item-merge-${id}`).px(8).py(6).gap(10).items_start().rounded(6).cursor_pointer()
+            .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.merge(id, cx))
+            .child(div().pt(2).child(this.glyph("pull", 14, t.muted)))
+            .child(v_flex().child(div().text_size(12.5).font_semibold().child(title)).child(div().text_size(11.5).text_color(t.muted).child(note)))))));
   }
 }
