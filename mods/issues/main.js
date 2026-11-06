@@ -378,9 +378,11 @@ export default class Issues extends View {
     this.refresh(cx, true); cx.notify();
   }
 
+  // Merged is closed, as github.com draws it: a merged pull request is in the
+  // Closed list, which is why the counts beside it add up that way too.
   shown() {
-    const q = this.query.trim().toLowerCase();
-    return this.items().filter((i) => i.state === this.state
+    const q = this.query.trim().toLowerCase(), open = this.state === "OPEN";
+    return this.items().filter((i) => (i.state === "OPEN") === open
       && (!this.mine || i.assignees.some((a) => a.login === this.me))
       && (!q || `${i.ref} ${i.title}`.toLowerCase().includes(q))).sort(SORTS[sort()].by);
   }
